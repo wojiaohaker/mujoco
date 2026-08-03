@@ -1,0 +1,29 @@
+# mujoco_sim 配置文件
+# 格式与 Matrix robot_mujoco 的 config.yaml 兼容
+
+# 机器人模型 (相对于 zsibot_robots/ 目录, 或绝对路径)
+robot: "xgb"
+
+# 场景文件 (在 robot 模型目录下)
+robot_scene: "scene_terrain_yard.xml"
+
+# ===== 通信配置 =====
+
+# eCAL 通信 (与 mc_ctrl type=5 交互)
+enable_ecal: 1
+
+# UDP 输出 (发送给 CarlaUnreal, mc_ctrl 用 eCAL 不走 UDP)
+enable_udp: 1
+udp_target_ip: "127.0.0.1"
+udp_target_port: 25001
+
+# ===== 仿真参数 =====
+
+# GLFW 可视化窗口 (1=弹出MuJoCo界面, 0=无头模式)
+enable_gui: 1
+
+# 物理步进频率 (Hz), MuJoCo 默认 timestep=0.002 → 500Hz
+sim_rate_hz: 500
+
+# 状态发布频率 (Hz)
+publish_rate_hz: 500
