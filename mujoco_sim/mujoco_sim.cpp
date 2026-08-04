@@ -92,6 +92,8 @@ SimConfig SimConfig::LoadFromFile(const std::string& path) {
             cfg.sim_rate_hz = std::stod(value);
         } else if (key == "publish_rate_hz") {
             cfg.publish_rate_hz = std::stod(value);
+        } else if (key == "udp_rate_hz") {
+            cfg.udp_rate_hz = std::stod(value);
         } else if (key == "enable_gui") {
             cfg.enable_gui = (value == "1" || value == "true");
         }
@@ -123,6 +125,9 @@ MujocoSim::MujocoSim() = default;
 
 MujocoSim::~MujocoSim() {
     Stop();
+    // 等待线程结束
+    if (physics_thread_.joinable()) physics_thread_.join();
+    if (bridge_thread_.joinable())  bridge_thread_.join();
     if (udp_sock_ >= 0) {
         close(udp_sock_);
     }
@@ -221,23 +226,26 @@ void MujocoSim::PrintModelInfo() {
     // 打印关节
     std::cout << "\n<<------------- Joint ------------->>" << std::endl;
     for (int i = 0; i < model_->njnt; i++) {
+        const char* name = mj_id2name(model_, mjOBJ_JOINT, i);
         std::cout << "  joint[" << i << "]: "
-                  << mj_id2name(model_, mjOBJ_JOINT, i)
+                  << (name ? name : "(null)")
                   << " (qpos_adr=" << model_->jnt_qposadr[i] << ")" << std::endl;
     }
 
     // 打印执行器
     std::cout << "\n<<------------- Actuator ------------->>" << std::endl;
     for (int i = 0; i < model_->nu; i++) {
+        const char* name = mj_id2name(model_, mjOBJ_ACTUATOR, i);
         std::cout << "  actuator[" << i << "]: "
-                  << mj_id2name(model_, mjOBJ_ACTUATOR, i) << std::endl;
+                  << (name ? name : "(null)") << std::endl;
     }
 
     // 打印传感器
     std::cout << "\n<<------------- Sensor ------------->>" << std::endl;
     for (int i = 0; i < model_->nsensor; i++) {
+        const char* name = mj_id2name(model_, mjOBJ_SENSOR, i);
         std::cout << "  sensor[" << i << "]: "
-                  << mj_id2name(model_, mjOBJ_SENSOR, i)
+                  << (name ? name : "(null)")
                   << " (dim=" << model_->sensor_dim[i]
                   << ", adr=" << model_->sensor_adr[i] << ")" << std::endl;
     }
@@ -254,30 +262,36 @@ void MujocoSim::Run() {
 
 void MujocoSim::RunHeadless() {
     running_.store(true);
-    std::cout << "[MujocoSim] 仿真循环启动 (headless, rate=" << config_.sim_rate_hz << " Hz)"
-              << std::endl;
 
-    const auto period = std::chrono::microseconds(
-        static_cast<int64_t>(1e6 / config_.sim_rate_hz));
-    auto next_time = std::chrono::steady_clock::now();
-
-    while (running_.load()) {
-        next_time += period;
-        ApplyControl();
-        PhysicsStep();
-        PublishState();
-        step_count_++;
-
-        if (step_count_ % 5000 == 0) {
-            std::cout << "[MujocoSim] step=" << step_count_
-                      << ", time=" << data_->time
-                      << ", pub=" << publish_count_ << std::endl;
-        }
-
-        std::this_thread::sleep_until(next_time);
+    // 初始化 SharedState 向量
+    {
+        std::lock_guard<std::mutex> lock(state_mutex_);
+        shared_state_.q_joint.resize(12, 0.0f);
+        shared_state_.qd_joint.resize(12, 0.0f);
+        shared_state_.tau_joint.resize(12, 0.0f);
+        shared_state_.base_position.resize(3, 0.0f);
+        shared_state_.base_quat.resize(4, 0.0f);
+        shared_state_.base_quat[0] = 1.0f;  // w=1 (identity)
+        shared_state_.imu_gyro.resize(3, 0.0f);
+        shared_state_.imu_acc.resize(3, 0.0f);
+        shared_state_.base_linvel.resize(3, 0.0f);
     }
 
-    std::cout << "[MujocoSim] 仿真循环结束, 总步数=" << step_count_ << std::endl;
+    // 启动 CarlaSdkBridgeThread (通信桥接)
+    std::cout << "[CarlaSdkBridgeThread] 启动通信桥接线程..." << std::endl;
+    bridge_thread_ = std::thread(&MujocoSim::CarlaSdkBridgeThreadFunc, this);
+
+    // 启动 PhysicsThread (物理仿真)
+    std::cout << "[PhysicsThread] 启动物理仿真线程 (rate=" << config_.sim_rate_hz << " Hz)..." << std::endl;
+    physics_thread_ = std::thread(&MujocoSim::PhysicsThreadFunc, this);
+
+    // 等待线程结束
+    physics_thread_.join();
+    bridge_thread_.join();
+
+    std::cout << "[MujocoSim] 仿真结束, step=" << step_count_
+              << ", eCAL_pub=" << publish_count_
+              << ", udp_send=" << udp_send_count_ << std::endl;
 }
 
 void MujocoSim::RunWithGui() {
@@ -328,26 +342,27 @@ void MujocoSim::RunWithGui() {
 
     std::cout << "[GUI] 窗口已打开. ESC=退出, Backspace=重置, 鼠标旋转/缩放" << std::endl;
 
-    // 物理线程 (500Hz)
-    std::thread physics_thread([this]() {
-        const auto period = std::chrono::microseconds(
-            static_cast<int64_t>(1e6 / config_.sim_rate_hz));
-        auto next_time = std::chrono::steady_clock::now();
+    // 初始化 SharedState 向量
+    {
+        std::lock_guard<std::mutex> lock(state_mutex_);
+        shared_state_.q_joint.resize(12, 0.0f);
+        shared_state_.qd_joint.resize(12, 0.0f);
+        shared_state_.tau_joint.resize(12, 0.0f);
+        shared_state_.base_position.resize(3, 0.0f);
+        shared_state_.base_quat.resize(4, 0.0f);
+        shared_state_.base_quat[0] = 1.0f;
+        shared_state_.imu_gyro.resize(3, 0.0f);
+        shared_state_.imu_acc.resize(3, 0.0f);
+        shared_state_.base_linvel.resize(3, 0.0f);
+    }
 
-        while (running_.load()) {
-            next_time += period;
-            ApplyControl();
-            PhysicsStep();
-            PublishState();
-            step_count_++;
+    // 启动 CarlaSdkBridgeThread (通信桥接)
+    std::cout << "[CarlaSdkBridgeThread] 启动通信桥接线程..." << std::endl;
+    bridge_thread_ = std::thread(&MujocoSim::CarlaSdkBridgeThreadFunc, this);
 
-            if (step_count_ % 5000 == 0) {
-                std::cout << "[MujocoSim] step=" << step_count_
-                          << ", time=" << data_->time << std::endl;
-            }
-            std::this_thread::sleep_until(next_time);
-        }
-    });
+    // 启动 PhysicsThread (500Hz 物理仿真)
+    std::cout << "[PhysicsThread] 启动物理仿真线程 (rate=" << config_.sim_rate_hz << " Hz)..." << std::endl;
+    physics_thread_ = std::thread(&MujocoSim::PhysicsThreadFunc, this);
 
     // 渲染主循环 (~60fps)
     while (!glfwWindowShouldClose(window) && running_.load()) {
@@ -361,9 +376,10 @@ void MujocoSim::RunWithGui() {
         glfwPollEvents();
     }
 
-    // 停止物理线程
+    // 停止线程
     running_.store(false);
-    physics_thread.join();
+    physics_thread_.join();
+    bridge_thread_.join();
 
     // 清理
     mjv_freeScene(&s_scn_);
@@ -371,7 +387,9 @@ void MujocoSim::RunWithGui() {
     glfwDestroyWindow(window);
     glfwTerminate();
 
-    std::cout << "[MujocoSim] 仿真结束, 总步数=" << step_count_ << std::endl;
+    std::cout << "[MujocoSim] 仿真结束, step=" << step_count_
+              << ", eCAL_pub=" << publish_count_
+              << ", udp_send=" << udp_send_count_ << std::endl;
 }
 
 // ==================== GLFW 回调 ====================
@@ -429,17 +447,258 @@ void MujocoSim::Stop() {
     running_.store(false);
 }
 
+// ==================== 线程实现 ====================
+
+void MujocoSim::PhysicsThreadFunc() {
+    std::cout << "[PhysicsThread] 线程启动" << std::endl;
+
+    const auto period = std::chrono::microseconds(
+        static_cast<int64_t>(1e6 / config_.sim_rate_hz));
+    auto next_time = std::chrono::steady_clock::now();
+
+    while (running_.load()) {
+        next_time += period;
+
+        ApplyControl();
+        PhysicsStep();
+        WriteSharedState();
+        step_count_++;
+
+        if (step_count_ % 5000 == 0) {
+            std::cout << "[PhysicsThread] step=" << step_count_
+                      << ", time=" << data_->time
+                      << ", base_pos=(" << data_->qpos[0] << "," << data_->qpos[1] << "," << data_->qpos[2] << ")"
+                      << ", quat_w=" << data_->qpos[3]
+                      << ", has_cmd=" << has_cmd_
+                      << std::endl;
+        }
+
+        std::this_thread::sleep_until(next_time);
+    }
+
+    std::cout << "[PhysicsThread] 线程结束, 总步数=" << step_count_ << std::endl;
+}
+
+void MujocoSim::CarlaSdkBridgeThreadFunc() {
+    std::cout << "[CarlaSdkBridgeThread] 线程启动" << std::endl;
+    std::cout << "[CarlaSdkBridgeThread] eCAL=" << (config_.enable_ecal ? "ON" : "OFF")
+              << ", UDP=" << (config_.enable_udp ? "ON" : "OFF")
+              << ", eCAL_rate=" << config_.publish_rate_hz
+              << ", UDP_rate=" << config_.udp_rate_hz << std::endl;
+
+    // 等待首次物理数据就绪
+    {
+        std::unique_lock<std::mutex> lock(state_mutex_);
+        while (running_.load() && shared_state_.write_seq == 0) {
+            lock.unlock();
+            std::this_thread::sleep_for(std::chrono::milliseconds(10));
+            lock.lock();
+        }
+    }
+    std::cout << "[CarlaSdkBridgeThread] MuJoCo 数据已就绪，开始通信循环" << std::endl;
+
+    // eCAL 发布周期
+    const auto ecal_period_us = static_cast<int64_t>(1e6 / config_.publish_rate_hz);
+    // UDP 发送周期
+    const auto udp_period_us = static_cast<int64_t>(1e6 / config_.udp_rate_hz);
+
+    auto next_ecal_time = std::chrono::steady_clock::now();
+    auto next_udp_time  = std::chrono::steady_clock::now();
+    uint64_t last_seq = 0;
+
+    while (running_.load()) {
+        auto now = std::chrono::steady_clock::now();
+        bool has_new_state = false;
+        robot_sdk::pb::RobotState cached_state;
+        // 缓存原始数据 (锁内拷贝)
+        double cached_sim_time = 0;
+        double cached_qpos[19] = {};
+        double cached_qvel[18] = {};
+        double cached_tau[12] = {};
+
+        // 读取 SharedState (只加锁一次，供 eCAL 和 UDP 共用)
+        {
+            std::lock_guard<std::mutex> lock(state_mutex_);
+            if (shared_state_.write_seq > last_seq) {
+                last_seq = shared_state_.write_seq;
+                cached_state = BuildRobotState();
+                // 拷贝原始数据
+                cached_sim_time = shared_state_.sim_time;
+                std::memcpy(cached_qpos, shared_state_.raw_qpos, sizeof(cached_qpos));
+                std::memcpy(cached_qvel, shared_state_.raw_qvel, sizeof(cached_qvel));
+                std::memcpy(cached_tau,  shared_state_.raw_tau,  sizeof(cached_tau));
+                has_new_state = true;
+            }
+        }
+
+        // eCAL 发布 (publish_rate_hz, 通常 500Hz)
+        if (config_.enable_ecal && has_new_state && now >= next_ecal_time) {
+            next_ecal_time += std::chrono::microseconds(ecal_period_us);
+            if (next_ecal_time < now) next_ecal_time = now;
+
+            if (ecal_pub_) {
+                ecal_pub_->Send(cached_state);
+                publish_count_++;
+            }
+        }
+
+        // UDP 发送: 412 字节原始二进制 (与 Matrix robot_mujoco 一致)
+        if (config_.enable_udp && has_new_state && now >= next_udp_time) {
+            next_udp_time += std::chrono::microseconds(udp_period_us);
+            if (next_udp_time < now) next_udp_time = now;
+
+            // 打包 412 bytes: sim_time(8) + nq(4) + qpos(19*8) + nv(4) + qvel(18*8) + nu(4) + tau(12*8)
+            char buf[412];
+            std::memset(buf, 0, sizeof(buf));
+            char* ptr = buf;
+
+            // sim_time (double, 8 bytes)
+            std::memcpy(ptr, &cached_sim_time, 8); ptr += 8;
+
+            // nq (int32, 4 bytes) = 19
+            int32_t nq = 19;
+            std::memcpy(ptr, &nq, 4); ptr += 4;
+
+            // qpos (19 doubles, 152 bytes)
+            std::memcpy(ptr, cached_qpos, 19 * sizeof(double)); ptr += 19 * sizeof(double);
+
+            // nv (int32, 4 bytes) = 18
+            int32_t nv = 18;
+            std::memcpy(ptr, &nv, 4); ptr += 4;
+
+            // qvel (18 doubles, 144 bytes)
+            std::memcpy(ptr, cached_qvel, 18 * sizeof(double)); ptr += 18 * sizeof(double);
+
+            // nu (int32, 4 bytes) = 12
+            int32_t nu = 12;
+            std::memcpy(ptr, &nu, 4); ptr += 4;
+
+            // tau (12 doubles, 96 bytes)
+            std::memcpy(ptr, cached_tau, 12 * sizeof(double)); ptr += 12 * sizeof(double);
+
+            SendUdp(std::string(buf, 412));
+            udp_send_count_++;
+
+            if (udp_send_count_ % 100 == 1) {
+                std::cout << "[CarlaSdkBridgeThread] UDP #" << udp_send_count_
+                          << ": 412 bytes (raw MuJoCo) → "
+                          << config_.udp_target_ip << ":" << config_.udp_target_port
+                          << std::endl;
+            }
+        }
+
+        // 避免忙等: 睡到下一个最近的事件
+        auto next_event = std::min(next_ecal_time, next_udp_time);
+        std::this_thread::sleep_until(next_event);
+    }
+
+    std::cout << "[CarlaSdkBridgeThread] 线程结束, eCAL_pub=" << publish_count_
+              << ", udp_send=" << udp_send_count_ << std::endl;
+}
+
+void MujocoSim::WriteSharedState() {
+    std::lock_guard<std::mutex> lock(state_mutex_);
+
+    // 关节位置 qpos[7:18] → q_joint[0:11]
+    for (int leg = 0; leg < 4; leg++) {
+        int qpos_idx = 7 + leg * 3;
+        int vel_idx  = 6 + leg * 3;
+        int tau_idx  = 24 + leg * 3;
+
+        shared_state_.q_joint[leg * 3 + 0] = static_cast<float>(data_->qpos[qpos_idx + 0]);
+        shared_state_.q_joint[leg * 3 + 1] = static_cast<float>(data_->qpos[qpos_idx + 1]);
+        shared_state_.q_joint[leg * 3 + 2] = static_cast<float>(data_->qpos[qpos_idx + 2]);
+
+        shared_state_.qd_joint[leg * 3 + 0] = static_cast<float>(data_->qvel[vel_idx + 0]);
+        shared_state_.qd_joint[leg * 3 + 1] = static_cast<float>(data_->qvel[vel_idx + 1]);
+        shared_state_.qd_joint[leg * 3 + 2] = static_cast<float>(data_->qvel[vel_idx + 2]);
+
+        shared_state_.tau_joint[leg * 3 + 0] = static_cast<float>(data_->sensordata[tau_idx + 0]);
+        shared_state_.tau_joint[leg * 3 + 1] = static_cast<float>(data_->sensordata[tau_idx + 1]);
+        shared_state_.tau_joint[leg * 3 + 2] = static_cast<float>(data_->sensordata[tau_idx + 2]);
+    }
+
+    // Base position: sensordata[46:48] (frame_pos, adr=46)
+    shared_state_.base_position[0] = static_cast<float>(data_->sensordata[46]);
+    shared_state_.base_position[1] = static_cast<float>(data_->sensordata[47]);
+    shared_state_.base_position[2] = static_cast<float>(data_->sensordata[48]);
+
+    // Base quaternion: sensordata[36:39] (imu_quat, adr=36, w,x,y,z)
+    shared_state_.base_quat[0] = static_cast<float>(data_->sensordata[36]);
+    shared_state_.base_quat[1] = static_cast<float>(data_->sensordata[37]);
+    shared_state_.base_quat[2] = static_cast<float>(data_->sensordata[38]);
+    shared_state_.base_quat[3] = static_cast<float>(data_->sensordata[39]);
+
+    // IMU gyro: sensordata[40:42] (imu_gyro, adr=40)
+    shared_state_.imu_gyro[0] = static_cast<float>(data_->sensordata[40]);
+    shared_state_.imu_gyro[1] = static_cast<float>(data_->sensordata[41]);
+    shared_state_.imu_gyro[2] = static_cast<float>(data_->sensordata[42]);
+
+    // IMU acc: sensordata[43:45] (imu_acc, adr=43)
+    shared_state_.imu_acc[0] = static_cast<float>(data_->sensordata[43]);
+    shared_state_.imu_acc[1] = static_cast<float>(data_->sensordata[44]);
+    shared_state_.imu_acc[2] = static_cast<float>(data_->sensordata[45]);
+
+    // Base linear velocity: sensordata[49:51] (frame_vel, adr=49)
+    shared_state_.base_linvel[0] = static_cast<float>(data_->sensordata[49]);
+    shared_state_.base_linvel[1] = static_cast<float>(data_->sensordata[50]);
+    shared_state_.base_linvel[2] = static_cast<float>(data_->sensordata[51]);
+
+    // ---- 原始 MuJoCo 数据 (UDP 9999 渲染同步) ----
+    // raw_qpos[0:2] = base_pos, [3:6] = base_quat(w,x,y,z), [7:18] = joints
+    for (int i = 0; i < model_->nq && i < 19; i++) {
+        shared_state_.raw_qpos[i] = data_->qpos[i];
+    }
+    for (int i = 0; i < model_->nv && i < 18; i++) {
+        shared_state_.raw_qvel[i] = data_->qvel[i];
+    }
+    // tau: sensordata[24:35] = jointactuatorfrc (12 joints)
+    for (int i = 0; i < 12; i++) {
+        shared_state_.raw_tau[i] = data_->sensordata[24 + i];
+    }
+
+    shared_state_.sim_time = data_->time;
+    shared_state_.write_seq++;
+}
+
 void MujocoSim::PhysicsStep() {
     mj_step(model_, data_);
 }
 
 void MujocoSim::ApplyControl() {
     std::lock_guard<std::mutex> lock(cmd_mutex_);
-    if (!has_cmd_) return;
+    if (!has_cmd_) {
+        // 无命令时: 零力矩, 让机器人自然下落 (与 robot_mujoco 一致)
+        if (model_ && data_) {
+            for (int i = 0; i < model_->nu; i++) {
+                data_->ctrl[i] = 0.0;
+            }
+        }
+        return;
+    }
 
     const auto& cmd = latest_cmd_;
 
-    // PD 控制律: tau = kp*(q_des - q) + kd*(qd_des - qd) + tau_ff
+    // 检查 PD 是否激活 (任一 kp 非零即为激活)
+    // PASSIVE 模式发送全零命令 (kp=0), 此时不应加 qfrc_bias, 否则机器人会被向上推
+    bool pd_active = false;
+    for (int leg = 0; leg < 4; leg++) {
+        if (cmd.kp_abad_size() > leg && cmd.kp_abad(leg) != 0.0) { pd_active = true; break; }
+        if (cmd.kp_hip_size() > leg && cmd.kp_hip(leg) != 0.0) { pd_active = true; break; }
+        if (cmd.kp_knee_size() > leg && cmd.kp_knee(leg) != 0.0) { pd_active = true; break; }
+    }
+
+    if (!pd_active) {
+        // PASSIVE 模式: 零力矩, 让机器人自然下落
+        for (int i = 0; i < model_->nu; i++) {
+            data_->ctrl[i] = 0.0;
+        }
+        return;
+    }
+
+    // PD 激活 (STANDUP / RL 模式): 纯 PD 控制律
+    // 注意: 不调用 mj_forward, mj_step 内部会自动计算 qfrc_bias
+    // tau = kp*(q_des - q) + kd*(qd_des - qd) + tau_ff
     // 关节顺序: [FR_abad, FR_hip, FR_knee, FL_abad, FL_hip, FL_knee,
     //            RR_abad, RR_hip, RR_knee, RL_abad, RL_hip, RL_knee]
     //
@@ -484,58 +743,51 @@ void MujocoSim::ApplyControl() {
 }
 
 robot_sdk::pb::RobotState MujocoSim::BuildRobotState() {
+    // 注意: 调用者必须已持有 state_mutex_
     robot_sdk::pb::RobotState state;
 
-    // 从 qpos/qvel 读取关节状态
-    // qpos[7:18] = 12个关节位置
-    // qvel[6:17] = 12个关节速度
+    // 关节状态: 从 shared_state_ 读取
     for (int leg = 0; leg < 4; leg++) {
-        int qpos_idx = 7 + leg * 3;
-        int qvel_idx = 6 + leg * 3;
+        state.add_q_abad(shared_state_.q_joint[leg * 3 + 0]);
+        state.add_q_hip(shared_state_.q_joint[leg * 3 + 1]);
+        state.add_q_knee(shared_state_.q_joint[leg * 3 + 2]);
+        state.add_q_foot(0.0f);
 
-        state.add_q_abad(static_cast<float>(data_->qpos[qpos_idx + 0]));
-        state.add_q_hip(static_cast<float>(data_->qpos[qpos_idx + 1]));
-        state.add_q_knee(static_cast<float>(data_->qpos[qpos_idx + 2]));
-        state.add_q_foot(0.0f);  // xgb 无足端关节
-
-        state.add_qd_abad(static_cast<float>(data_->qvel[qvel_idx + 0]));
-        state.add_qd_hip(static_cast<float>(data_->qvel[qvel_idx + 1]));
-        state.add_qd_knee(static_cast<float>(data_->qvel[qvel_idx + 2]));
-        state.add_qd_foot(0.0f);  // xgb 无足端关节
+        state.add_qd_abad(shared_state_.qd_joint[leg * 3 + 0]);
+        state.add_qd_hip(shared_state_.qd_joint[leg * 3 + 1]);
+        state.add_qd_knee(shared_state_.qd_joint[leg * 3 + 2]);
     }
 
-    // 从传感器读取力矩 (sensor index 24:35)
+    // 关节力矩
     for (int leg = 0; leg < 4; leg++) {
-        int torque_idx = 24 + leg * 3;
-        state.add_tau_abad_fb(static_cast<float>(data_->sensordata[torque_idx + 0]));
-        state.add_tau_hip_fb(static_cast<float>(data_->sensordata[torque_idx + 1]));
-        state.add_tau_knee_fb(static_cast<float>(data_->sensordata[torque_idx + 2]));
+        state.add_tau_abad_fb(shared_state_.tau_joint[leg * 3 + 0]);
+        state.add_tau_hip_fb(shared_state_.tau_joint[leg * 3 + 1]);
+        state.add_tau_knee_fb(shared_state_.tau_joint[leg * 3 + 2]);
     }
 
-    // 足端位置 (暂用 position 字段存储 base position)
-    // framepos sensor index 45:47
-    state.add_position(static_cast<float>(data_->sensordata[45]));
-    state.add_position(static_cast<float>(data_->sensordata[46]));
-    state.add_position(static_cast<float>(data_->sensordata[47]));
+    // Base position
+    for (int i = 0; i < 3; i++) {
+        state.add_position(shared_state_.base_position[i]);
+    }
 
     // tau_foot_fb (填0, xgb 无足端力矩传感器)
     for (int i = 0; i < 4; i++) {
         state.add_tau_foot_fb(0.0f);
     }
 
-    // 四元数 (imu_quat sensor index 36:39, w,x,y,z)
+    // 四元数 (w,x,y,z)
     for (int i = 0; i < 4; i++) {
-        state.add_quat(static_cast<float>(data_->sensordata[36 + i]));
+        state.add_quat(shared_state_.base_quat[i]);
     }
 
-    // 陀螺仪 (imu_gyro sensor index 39:41)
+    // 陀螺仪
     for (int i = 0; i < 3; i++) {
-        state.add_gyro(static_cast<float>(data_->sensordata[39 + i]));
+        state.add_gyro(shared_state_.imu_gyro[i]);
     }
 
-    // 加速度计 (imu_acc sensor index 42:44)
+    // 加速度计
     for (int i = 0; i < 3; i++) {
-        state.add_acc(static_cast<float>(data_->sensordata[42 + i]));
+        state.add_acc(shared_state_.imu_acc[i]);
     }
 
     // 时间戳 (纳秒)
@@ -545,47 +797,26 @@ robot_sdk::pb::RobotState MujocoSim::BuildRobotState() {
     state.set_time_stamp(static_cast<uint64_t>(ns));
 
     // rpy (从四元数计算)
-    double w = data_->sensordata[36];
-    double x = data_->sensordata[37];
-    double y = data_->sensordata[38];
-    double z = data_->sensordata[39];
-    // roll
-    double roll = std::atan2(2.0 * (w * x + y * z), 1.0 - 2.0 * (x * x + y * y));
-    // pitch
-    double sinp = 2.0 * (w * y - z * x);
+    double w = shared_state_.base_quat[0];
+    double x = shared_state_.base_quat[1];
+    double y = shared_state_.base_quat[2];
+    double z = shared_state_.base_quat[3];
+    double roll  = std::atan2(2.0 * (w * x + y * z), 1.0 - 2.0 * (x * x + y * y));
+    double sinp  = 2.0 * (w * y - z * x);
     double pitch = (std::abs(sinp) >= 1.0) ?
         std::copysign(M_PI / 2, sinp) : std::asin(sinp);
-    // yaw
-    double yaw = std::atan2(2.0 * (w * z + x * y), 1.0 - 2.0 * (y * y + z * z));
+    double yaw   = std::atan2(2.0 * (w * z + x * y), 1.0 - 2.0 * (y * y + z * z));
 
     state.add_rpy(static_cast<float>(roll));
     state.add_rpy(static_cast<float>(pitch));
     state.add_rpy(static_cast<float>(yaw));
 
-    // v_world (frame linvel sensor index 48:50)
+    // v_world (base linear velocity)
     for (int i = 0; i < 3; i++) {
-        state.add_v_world(static_cast<float>(data_->sensordata[48 + i]));
+        state.add_v_world(shared_state_.base_linvel[i]);
     }
 
     return state;
-}
-
-void MujocoSim::PublishState() {
-    auto state = BuildRobotState();
-
-    // eCAL 发布
-    if (config_.enable_ecal && ecal_pub_) {
-        ecal_pub_->Send(state);
-    }
-
-    // UDP 发送
-    if (config_.enable_udp) {
-        std::string serialized;
-        state.SerializeToString(&serialized);
-        SendUdp(serialized);
-    }
-
-    publish_count_++;
 }
 
 void MujocoSim::OnRobotCmdReceived(const char* topic_name,
@@ -594,6 +825,18 @@ void MujocoSim::OnRobotCmdReceived(const char* topic_name,
     std::lock_guard<std::mutex> lock(cmd_mutex_);
     latest_cmd_ = msg;
     has_cmd_ = true;
+
+    // 调试: 每次收到命令计数
+    static uint64_t cmd_count = 0;
+    cmd_count++;
+    if (cmd_count % 500 == 1) {
+        std::cout << "[eCAL] RobotCmd #" << cmd_count
+                  << ": q_des_abad[0]=" << (msg.q_des_abad_size() > 0 ? msg.q_des_abad(0) : -999)
+                  << " q_des_hip[0]=" << (msg.q_des_hip_size() > 0 ? msg.q_des_hip(0) : -999)
+                  << " q_des_knee[0]=" << (msg.q_des_knee_size() > 0 ? msg.q_des_knee(0) : -999)
+                  << " kp_abad[0]=" << (msg.kp_abad_size() > 0 ? msg.kp_abad(0) : -999)
+                  << std::endl;
+    }
 }
 
 bool MujocoSim::InitUdp() {
@@ -603,7 +846,7 @@ bool MujocoSim::InitUdp() {
         return false;
     }
 
-    // 目标: CarlaUnreal (port 25001)
+    // 目标: CarlaUnreal (port 9999, Matrix-compatible)
     std::memset(&udp_dest_, 0, sizeof(udp_dest_));
     udp_dest_.sin_family = AF_INET;
     udp_dest_.sin_port = htons(config_.udp_target_port);

@@ -12,10 +12,10 @@ robot_scene: "scene_terrain_yard.xml"
 # eCAL 通信 (与 mc_ctrl type=5 交互)
 enable_ecal: 1
 
-# UDP 输出 (发送给 CarlaUnreal, mc_ctrl 用 eCAL 不走 UDP)
+# UDP 输出 (发送给 CarlaUnreal 渲染, 端口 9999 与 Matrix robot_mujoco 一致)
 enable_udp: 1
 udp_target_ip: "127.0.0.1"
-udp_target_port: 25001
+udp_target_port: 9999
 
 # ===== 仿真参数 =====
 
@@ -25,5 +25,8 @@ enable_gui: 1
 # 物理步进频率 (Hz), MuJoCo 默认 timestep=0.002 → 500Hz
 sim_rate_hz: 500
 
-# 状态发布频率 (Hz)
+# 状态发布频率 (Hz) — eCAL 发布给 mc_ctrl
 publish_rate_hz: 500
+
+# UDP 渲染状态发送频率 (Hz) — 发送给 CarlaUE5 (与 Matrix ZsibotSdkBridge ~100Hz 一致)
+udp_rate_hz: 100
