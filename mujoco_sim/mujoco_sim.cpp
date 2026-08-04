@@ -697,13 +697,7 @@ void MujocoSim::ApplyControl() {
     }
 
     // PD 激活 (STANDUP / RL 模式): 纯 PD 控制律
-    // 注意: 不调用 mj_forward, mj_step 内部会自动计算 qfrc_bias
     // tau = kp*(q_des - q) + kd*(qd_des - qd) + tau_ff
-    // 关节顺序: [FR_abad, FR_hip, FR_knee, FL_abad, FL_hip, FL_knee,
-    //            RR_abad, RR_hip, RR_knee, RL_abad, RL_hip, RL_knee]
-    //
-    // qpos: [0:6]=freejoint(pos+quat), [7:18]=12个关节
-    // qvel: [0:5]=freejoint(linvel+angvel), [6:17]=12个关节
 
     for (int leg = 0; leg < 4; leg++) {
         int jnt_idx = 7 + leg * 3;   // qpos 中的关节起始索引
@@ -736,7 +730,7 @@ void MujocoSim::ApplyControl() {
             double qd = data_->qvel[vel_idx + 2];
             double tau = cmd.kp_knee(leg) * (cmd.q_des_knee(leg) - q)
                        + cmd.kd_knee(leg) * (cmd.qd_des_knee_size() > leg ? cmd.qd_des_knee(leg) : 0.0 - qd)
-                       + 0.0;  // knee 没有 tau_ff 字段
+                       + 0.0;
             data_->ctrl[ctrl_idx + 2] = tau;
         }
     }
@@ -812,10 +806,29 @@ robot_sdk::pb::RobotState MujocoSim::BuildRobotState() {
     state.add_rpy(static_cast<float>(pitch));
     state.add_rpy(static_cast<float>(yaw));
 
-    // v_world (base linear velocity)
-    for (int i = 0; i < 3; i++) {
-        state.add_v_world(shared_state_.base_linvel[i]);
-    }
+    // v_world: 将世界坐标系线速度转换为 body 坐标系
+    // framelinvel 输出世界坐标系速度, RL policy 期望 body 坐标系
+    // v_body = R^T * v_world, 其中 R 由四元数 (w,x,y,z) 定义
+    double qw = shared_state_.base_quat[0];
+    double qx = shared_state_.base_quat[1];
+    double qy = shared_state_.base_quat[2];
+    double qz = shared_state_.base_quat[3];
+    double vw_x = shared_state_.base_linvel[0];
+    double vw_y = shared_state_.base_linvel[1];
+    double vw_z = shared_state_.base_linvel[2];
+    // R^T (世界→body) 旋转
+    double vb_x = (1 - 2*(qy*qy + qz*qz)) * vw_x
+                + 2*(qx*qy + qw*qz) * vw_y
+                + 2*(qx*qz - qw*qy) * vw_z;
+    double vb_y = 2*(qx*qy - qw*qz) * vw_x
+                + (1 - 2*(qx*qx + qz*qz)) * vw_y
+                + 2*(qy*qz + qw*qx) * vw_z;
+    double vb_z = 2*(qx*qz + qw*qy) * vw_x
+                + 2*(qy*qz - qw*qx) * vw_y
+                + (1 - 2*(qx*qx + qy*qy)) * vw_z;
+    state.add_v_world(static_cast<float>(vb_x));
+    state.add_v_world(static_cast<float>(vb_y));
+    state.add_v_world(static_cast<float>(vb_z));
 
     return state;
 }
