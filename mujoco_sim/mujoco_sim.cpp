@@ -34,6 +34,7 @@
 #include <unistd.h>
 
 #include <algorithm>
+#include <cmath>
 #include <cstring>
 #include <fstream>
 #include <iostream>
@@ -451,7 +452,7 @@ void MujocoSim::Stop() {
 // ==================== 线程实现 ====================
 
 void MujocoSim::PhysicsThreadFunc() {
-    std::cout << "[PhysicsThread] 线程启动 (BUILD=v4_clamp_check)" << std::endl;
+    std::cout << "[PhysicsThread] 线程启动 (BUILD=v5_ue_match_no_gyro_bias)" << std::endl;
 
     const auto period = std::chrono::microseconds(
         static_cast<int64_t>(1e6 / config_.sim_rate_hz));
@@ -540,6 +541,30 @@ void MujocoSim::CarlaSdkBridgeThreadFunc() {
             if (ecal_pub_) {
                 ecal_pub_->Send(cached_state);
                 publish_count_++;
+                // 每次发送都输出 protobuf 序列化大小
+                size_t state_bytes = cached_state.ByteSizeLong();
+                std::cout << "[eCAL TX] RobotState #" << publish_count_
+                          << ": " << state_bytes << " bytes"
+                          << " | q_abad=" << cached_state.q_abad_size()
+                          << " q_hip=" << cached_state.q_hip_size()
+                          << " q_knee=" << cached_state.q_knee_size()
+                          << " q_foot=" << cached_state.q_foot_size()
+                          << " qd_abad=" << cached_state.qd_abad_size()
+                          << " qd_hip=" << cached_state.qd_hip_size()
+                          << " qd_knee=" << cached_state.qd_knee_size()
+                          << " qd_foot=" << cached_state.qd_foot_size()
+                          << " tau_abad_fb=" << cached_state.tau_abad_fb_size()
+                          << " tau_hip_fb=" << cached_state.tau_hip_fb_size()
+                          << " tau_knee_fb=" << cached_state.tau_knee_fb_size()
+                          << " tau_foot_fb=" << cached_state.tau_foot_fb_size()
+                          << " position=" << cached_state.position_size()
+                          << " quat=" << cached_state.quat_size()
+                          << " gyro=" << cached_state.gyro_size()
+                          << " acc=" << cached_state.acc_size()
+                          << " rpy=" << cached_state.rpy_size()
+                          << " v_world=" << cached_state.v_world_size()
+                          << " ts=" << cached_state.time_stamp()
+                          << std::endl;
             }
         }
 
@@ -634,10 +659,19 @@ void MujocoSim::WriteSharedState() {
     shared_state_.base_quat[2] = static_cast<float>(data_->sensordata[38]);
     shared_state_.base_quat[3] = static_cast<float>(data_->sensordata[39]);
 
-    // IMU gyro: sensordata[40:42] (imu_gyro, adr=40)
-    shared_state_.imu_gyro[0] = static_cast<float>(data_->sensordata[40]);
-    shared_state_.imu_gyro[1] = static_cast<float>(data_->sensordata[41]);
-    shared_state_.imu_gyro[2] = static_cast<float>(data_->sensordata[42]);
+    // IMU gyro: 匹配 UE SendStateToMcCtrl() — 从 cvel 读取世界系角速度, R^T 变换到体坐标系.
+    // 不使用 sensordata gyro sensor (可能有 bias), 与 UE 完全一致.
+    {
+        int baseBody = 1; // torso
+        double wx = data_->cvel[baseBody * 6 + 0];
+        double wy = data_->cvel[baseBody * 6 + 1];
+        double wz = data_->cvel[baseBody * 6 + 2];
+        const double* R = &data_->xmat[baseBody * 9]; // row-major 3x3 (world←body)
+        // Body angular velocity = R^T * world angular velocity
+        shared_state_.imu_gyro[0] = static_cast<float>(R[0]*wx + R[3]*wy + R[6]*wz);
+        shared_state_.imu_gyro[1] = static_cast<float>(R[1]*wx + R[4]*wy + R[7]*wz);
+        shared_state_.imu_gyro[2] = static_cast<float>(R[2]*wx + R[5]*wy + R[8]*wz);
+    }
 
     // IMU acc: sensordata[43:45] (imu_acc, adr=43)
     shared_state_.imu_acc[0] = static_cast<float>(data_->sensordata[43]);
@@ -700,55 +734,53 @@ void MujocoSim::ApplyControl() {
         return;
     }
 
-    // PD 激活 (STANDUP / RL 模式): PD + tau_ff + qfrc_bias (重力补偿)
-    // tau = kp*(q_des - q) + kd*(qd_des - qd) + tau_ff + qfrc_bias
-    // qfrc_bias 包含重力项, 原始 robot_mujoco 使用 qfrc_bias 做重力补偿.
-    // RL 策略训练时假设底层有重力补偿, 否则 kp=20 无法对抗重力.
-    // 限幅 ±28 Nm (与 xgb.xml actuatorfrcrange 一致)
-    static constexpr double kMaxTorque = 28.0;
+    // PD 控制: 匹配 UE 内部模式 (ApplyUdpControl)
+    // tau = kp * (q_des - q) - kd * qvel
+    // 无 qfrc_bias 重力补偿, 无扭矩限幅 — 与 UE 内部模式完全一致.
+    // mc_ctrl (RL policy) 已包含 tau_ff 和重力补偿.
+    //
+    // 协议索引 → MuJoCo 关节映射 (与 UE ApplyUdpControl 完全一致):
+    //   protoIdx = jointType * 4 + leg
+    //   mjIdx    = leg * 3 + jointType
+    //   jntIdx   = mjIdx + 1  (skip freejoint)
 
     for (int leg = 0; leg < 4; leg++) {
-        int jnt_idx = 7 + leg * 3;   // qpos 中的关节起始索引
-        int vel_idx = 6 + leg * 3;   // qvel 中的关节起始索引
-        int ctrl_idx = leg * 3;      // ctrl 中的执行器起始索引
+        for (int jointType = 0; jointType < 3; jointType++) {
+            int mjIdx   = leg * 3 + jointType;   // MuJoCo actuator index
+            int protoIdx = jointType * 4 + leg;   // Protocol array index
+            int jntIdx  = mjIdx + 1;              // skip freejoint
 
-        // abad
-        if (cmd.q_des_abad_size() > leg && cmd.kp_abad_size() > leg) {
-            double q = data_->qpos[jnt_idx + 0];
-            double qd = data_->qvel[vel_idx + 0];
-            double bias = data_->qfrc_bias[vel_idx + 0];
-            double tau = cmd.kp_abad(leg) * (cmd.q_des_abad(leg) - q)
-                       + cmd.kd_abad(leg) * (cmd.qd_des_abad_size() > leg ? cmd.qd_des_abad(leg) : 0.0 - qd)
-                       + (cmd.tau_abad_ff_size() > leg ? cmd.tau_abad_ff(leg) : 0.0)
-                       + bias;
-            tau = std::max(-kMaxTorque, std::min(kMaxTorque, tau));
-            data_->ctrl[ctrl_idx + 0] = tau;
-        }
+            if (mjIdx >= model_->nu) break;
 
-        // hip
-        if (cmd.q_des_hip_size() > leg && cmd.kp_hip_size() > leg) {
-            double q = data_->qpos[jnt_idx + 1];
-            double qd = data_->qvel[vel_idx + 1];
-            double bias = data_->qfrc_bias[vel_idx + 1];
-            double tau = cmd.kp_hip(leg) * (cmd.q_des_hip(leg) - q)
-                       + cmd.kd_hip(leg) * (cmd.qd_des_hip_size() > leg ? cmd.qd_des_hip(leg) : 0.0 - qd)
-                       + (cmd.tau_hip_ff_size() > leg ? cmd.tau_hip_ff(leg) : 0.0)
-                       + bias;
-            tau = std::max(-kMaxTorque, std::min(kMaxTorque, tau));
-            data_->ctrl[ctrl_idx + 1] = tau;
-        }
+            double q  = data_->qpos[model_->jnt_qposadr[jntIdx]];
+            double qd = data_->qvel[model_->jnt_dofadr[jntIdx]];
 
-        // knee
-        if (cmd.q_des_knee_size() > leg && cmd.kp_knee_size() > leg) {
-            double q = data_->qpos[jnt_idx + 2];
-            double qd = data_->qvel[vel_idx + 2];
-            double bias = data_->qfrc_bias[vel_idx + 2];
-            double tau = cmd.kp_knee(leg) * (cmd.q_des_knee(leg) - q)
-                       + cmd.kd_knee(leg) * (cmd.qd_des_knee_size() > leg ? cmd.qd_des_knee(leg) : 0.0 - qd)
-                       + 0.0
-                       + bias;
-            tau = std::max(-kMaxTorque, std::min(kMaxTorque, tau));
-            data_->ctrl[ctrl_idx + 2] = tau;
+            // 从 cmd 读取 target, gain (按 jointType 选择正确的字段)
+            double target = 0, kp = 0, kd = 0, tau_ff = 0;
+            double qd_des = 0;
+
+            if (jointType == 0) { // ABAD
+                if (cmd.q_des_abad_size() > leg)  target = cmd.q_des_abad(leg);
+                if (cmd.qd_des_abad_size() > leg) qd_des = cmd.qd_des_abad(leg);
+                if (cmd.kp_abad_size() > leg)     kp = cmd.kp_abad(leg);
+                if (cmd.kd_abad_size() > leg)     kd = cmd.kd_abad(leg);
+                if (cmd.tau_abad_ff_size() > leg) tau_ff = cmd.tau_abad_ff(leg);
+            } else if (jointType == 1) { // HIP
+                if (cmd.q_des_hip_size() > leg)   target = cmd.q_des_hip(leg);
+                if (cmd.qd_des_hip_size() > leg)  qd_des = cmd.qd_des_hip(leg);
+                if (cmd.kp_hip_size() > leg)      kp = cmd.kp_hip(leg);
+                if (cmd.kd_hip_size() > leg)      kd = cmd.kd_hip(leg);
+                if (cmd.tau_hip_ff_size() > leg)  tau_ff = cmd.tau_hip_ff(leg);
+            } else { // KNEE
+                if (cmd.q_des_knee_size() > leg)  target = cmd.q_des_knee(leg);
+                if (cmd.qd_des_knee_size() > leg) qd_des = cmd.qd_des_knee(leg);
+                if (cmd.kp_knee_size() > leg)     kp = cmd.kp_knee(leg);
+                if (cmd.kd_knee_size() > leg)     kd = cmd.kd_knee(leg);
+                if (cmd.tau_knee_ff_size() > leg) tau_ff = cmd.tau_knee_ff(leg);
+            }
+
+            // 匹配 UE: tau = kp*(target-q) - kd*qvel + tau_ff
+            data_->ctrl[mjIdx] = kp * (target - q) - kd * qd + tau_ff;
         }
     }
 
@@ -765,7 +797,7 @@ void MujocoSim::ApplyControl() {
             fprintf(diag_fp, "tau_ff_abad0 tau_ff_hip0 tau_ff_knee0 ");
             fprintf(diag_fp, "v_world_x v_world_y v_world_z ");
             fprintf(diag_fp, "gyro_x gyro_y gyro_z acc_x acc_y acc_z\n");
-            fprintf(diag_fp, "# BUILD_MARKER=v4_clamp_check\n");
+            fprintf(diag_fp, "# BUILD_MARKER=v5_ue_match_no_gyro_bias\n");
         }
     }
     if (diag_fp && step_count_ % 100 == 0) {
@@ -861,45 +893,25 @@ robot_sdk::pb::RobotState MujocoSim::BuildRobotState() {
         state.add_quat(shared_state_.base_quat[i]);
     }
 
-    // 陀螺仪: 直接发送世界坐标系角速度
-    // 原始 robot_mujoco 直接发送 MuJoCo 传感器的世界坐标系数据,
-    // mc_ctrl RL 策略训练时接收世界坐标系角速度.
-    // 之前的 R^T 体坐标系转换是错误的, 会导致策略在倾斜时收到错误数据.
+    // 陀螺仪: cvel + R^T 体坐标系 (WriteSharedState 中计算).
+    // 匹配 UE 内部模式 SendStateToMcCtrl() 的实现.
+    // 无 bias 估计, 无 EMA 跟踪, 无滤波 — 与 UE 完全一致.
     for (int i = 0; i < 3; i++) {
         state.add_gyro(shared_state_.imu_gyro[i]);
     }
 
-    // 加速度计: 直接发送世界坐标系加速度
-    // 原始 robot_mujoco 直接发送 MuJoCo 传感器的世界坐标系数据 (含重力),
-    // mc_ctrl RL 策略训练时接收世界坐标系加速度.
+    // 加速度计: 保持世界坐标系 (与原始 robot_mujoco 一致)
+    // 反汇编确认原始 robot_mujoco 未对 acc 做 R^T 变换, 直接发送世界坐标系数据.
     for (int i = 0; i < 3; i++) {
         state.add_acc(shared_state_.imu_acc[i]);
     }
 
-    // 时间戳 (纳秒) — 使用 system_clock 与原始 robot_mujoco 保持一致
-    // 原始 robot_mujoco 使用 rclcpp::Clock::now() (底层为 system_clock/CLOCK_REALTIME),
-    // mc_ctrl 可能用 time_stamp 做消息新鲜度检查或状态估计时间传播.
-    // steady_clock (CLOCK_MONOTONIC) 值约 3.7e14, system_clock 值约 1.8e18,
-    // 差值约 56 年, 如果 mc_ctrl 有绝对时间检查会导致所有消息被判为过期.
-    auto now = std::chrono::system_clock::now();
-    auto ns = std::chrono::duration_cast<std::chrono::nanoseconds>(
-        now.time_since_epoch()).count();
-    state.set_time_stamp(static_cast<uint64_t>(ns));
+    // 时间戳: 不设置 (匹配原始 robot_mujoco 的 292 字节格式)
+    // eCAL 抓包确认 robot_mujoco 发送 ts=0, 因为 eCAL 共享内存即时送达, 无需新鲜度检查.
+    // 注意: Matrix UE 通过 UDP 发送时才使用 CLOCK_REALTIME (303 字节格式).
 
-    // rpy (从四元数计算)
-    double w = shared_state_.base_quat[0];
-    double x = shared_state_.base_quat[1];
-    double y = shared_state_.base_quat[2];
-    double z = shared_state_.base_quat[3];
-    double roll  = std::atan2(2.0 * (w * x + y * z), 1.0 - 2.0 * (x * x + y * y));
-    double sinp  = 2.0 * (w * y - z * x);
-    double pitch = (std::abs(sinp) >= 1.0) ?
-        std::copysign(M_PI / 2, sinp) : std::asin(sinp);
-    double yaw   = std::atan2(2.0 * (w * z + x * y), 1.0 - 2.0 * (y * y + z * z));
-
-    state.add_rpy(static_cast<float>(roll));
-    state.add_rpy(static_cast<float>(pitch));
-    state.add_rpy(static_cast<float>(yaw));
+    // rpy: 不发送 (匹配原始 robot_mujoco 的 292 字节格式)
+    // eCAL 抓包确认 robot_mujoco 不包含 rpy 字段.
 
     // v_world: 直接发送世界坐标系线速度
     // 与原始 Matrix/CarlaUnreal 保持一致: UE 端从 cvel 读取世界系速度直接发送,
@@ -919,9 +931,35 @@ void MujocoSim::OnRobotCmdReceived(const char* topic_name,
     latest_cmd_ = msg;
     has_cmd_ = true;
 
-    // 调试: 每次收到命令计数
+    // 每次收到命令都输出 protobuf 反序列化大小和字段信息
     static uint64_t cmd_count = 0;
     cmd_count++;
+    {
+        size_t cmd_bytes = msg.ByteSizeLong();
+        std::cout << "[eCAL RX] RobotCmd #" << cmd_count
+                  << ": " << cmd_bytes << " bytes"
+                  << " | q_des_abad=" << msg.q_des_abad_size()
+                  << " q_des_hip=" << msg.q_des_hip_size()
+                  << " q_des_knee=" << msg.q_des_knee_size()
+                  << " q_des_foot=" << msg.q_des_foot_size()
+                  << " qd_des_abad=" << msg.qd_des_abad_size()
+                  << " qd_des_hip=" << msg.qd_des_hip_size()
+                  << " qd_des_knee=" << msg.qd_des_knee_size()
+                  << " qd_des_foot=" << msg.qd_des_foot_size()
+                  << " kp_abad=" << msg.kp_abad_size()
+                  << " kp_hip=" << msg.kp_hip_size()
+                  << " kp_knee=" << msg.kp_knee_size()
+                  << " kp_foot=" << msg.kp_foot_size()
+                  << " kd_abad=" << msg.kd_abad_size()
+                  << " kd_hip=" << msg.kd_hip_size()
+                  << " kd_knee=" << msg.kd_knee_size()
+                  << " kd_foot=" << msg.kd_foot_size()
+                  << " tau_abad_ff=" << msg.tau_abad_ff_size()
+                  << " tau_hip_ff=" << msg.tau_hip_ff_size()
+                  << " tau_knee_ff=" << msg.tau_knee_ff_size()
+                  << " tau_foot_ff=" << msg.tau_foot_ff_size()
+                  << std::endl;
+    }
     if (cmd_count % 500 == 1) {
         std::cout << "[eCAL] RobotCmd #" << cmd_count
                   << ": q_des_abad[0]=" << (msg.q_des_abad_size() > 0 ? msg.q_des_abad(0) : -999)

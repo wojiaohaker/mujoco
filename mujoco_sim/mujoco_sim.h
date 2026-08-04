@@ -222,6 +222,8 @@ private:
     // mj_step 后保存, 用于下一步的重力补偿 (PASSIVE 模式也需要)
     double prev_grav_comp_[12] = {};
 
+
+
     // GUI 状态（静态回调需要访问）
     static mjModel* s_model_;
     static mjData*  s_data_;
