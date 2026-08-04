@@ -613,6 +613,27 @@ void MujocoSim::WriteSharedState() {
         shared_state_.qd_joint[leg * 3 + 1] = static_cast<float>(data_->qvel[vel_idx + 1]);
         shared_state_.qd_joint[leg * 3 + 2] = static_cast<float>(data_->qvel[vel_idx + 2]);
 
+        // 关节速度低通滤波 (模拟 robot_mujoco 的关节速度观测器)
+        // 仅影响发布值，不影响内部 PD 控制
+        {
+            static double filt[12] = {};
+            static bool init = false;
+            const double alpha = 0.2;
+            int base = leg * 3;
+            if (!init) {
+                // 首次: 初始化全部12个关节
+                for (int l = 0; l < 4; l++)
+                    for (int j = 0; j < 3; j++)
+                        filt[l*3+j] = data_->qvel[6 + l*3 + j];
+                init = true;
+            } else {
+                for (int j = 0; j < 3; j++)
+                    filt[base+j] = alpha * data_->qvel[vel_idx+j] + (1.0-alpha) * filt[base+j];
+            }
+            for (int j = 0; j < 3; j++)
+                shared_state_.qd_joint[base+j] = static_cast<float>(filt[base+j]);
+        }
+
         shared_state_.tau_joint[leg * 3 + 0] = static_cast<float>(data_->sensordata[tau_idx + 0]);
         shared_state_.tau_joint[leg * 3 + 1] = static_cast<float>(data_->sensordata[tau_idx + 1]);
         shared_state_.tau_joint[leg * 3 + 2] = static_cast<float>(data_->sensordata[tau_idx + 2]);
@@ -696,8 +717,9 @@ void MujocoSim::ApplyControl() {
         return;
     }
 
-    // PD 激活 (STANDUP / RL 模式): 纯 PD 控制律
-    // tau = kp*(q_des - q) + kd*(qd_des - qd) + tau_ff
+    // PD 激活 (STANDUP / RL 模式): PD + 重力补偿
+    // tau = kp*(q_des - q) + kd*(qd_des - qd) + tau_ff + qfrc_bias
+    mj_forward(model_, data_);
 
     for (int leg = 0; leg < 4; leg++) {
         int jnt_idx = 7 + leg * 3;   // qpos 中的关节起始索引
@@ -710,7 +732,8 @@ void MujocoSim::ApplyControl() {
             double qd = data_->qvel[vel_idx + 0];
             double tau = cmd.kp_abad(leg) * (cmd.q_des_abad(leg) - q)
                        + cmd.kd_abad(leg) * (cmd.qd_des_abad_size() > leg ? cmd.qd_des_abad(leg) : 0.0 - qd)
-                       + (cmd.tau_abad_ff_size() > leg ? cmd.tau_abad_ff(leg) : 0.0);
+                       + (cmd.tau_abad_ff_size() > leg ? cmd.tau_abad_ff(leg) : 0.0)
+                       + data_->qfrc_bias[vel_idx + 0];
             data_->ctrl[ctrl_idx + 0] = tau;
         }
 
@@ -720,7 +743,8 @@ void MujocoSim::ApplyControl() {
             double qd = data_->qvel[vel_idx + 1];
             double tau = cmd.kp_hip(leg) * (cmd.q_des_hip(leg) - q)
                        + cmd.kd_hip(leg) * (cmd.qd_des_hip_size() > leg ? cmd.qd_des_hip(leg) : 0.0 - qd)
-                       + (cmd.tau_hip_ff_size() > leg ? cmd.tau_hip_ff(leg) : 0.0);
+                       + (cmd.tau_hip_ff_size() > leg ? cmd.tau_hip_ff(leg) : 0.0)
+                       + data_->qfrc_bias[vel_idx + 1];
             data_->ctrl[ctrl_idx + 1] = tau;
         }
 
@@ -730,7 +754,8 @@ void MujocoSim::ApplyControl() {
             double qd = data_->qvel[vel_idx + 2];
             double tau = cmd.kp_knee(leg) * (cmd.q_des_knee(leg) - q)
                        + cmd.kd_knee(leg) * (cmd.qd_des_knee_size() > leg ? cmd.qd_des_knee(leg) : 0.0 - qd)
-                       + 0.0;
+                       + 0.0
+                       + data_->qfrc_bias[vel_idx + 2];
             data_->ctrl[ctrl_idx + 2] = tau;
         }
     }
