@@ -876,8 +876,12 @@ robot_sdk::pb::RobotState MujocoSim::BuildRobotState() {
         state.add_acc(shared_state_.imu_acc[i]);
     }
 
-    // 时间戳 (纳秒)
-    auto now = std::chrono::steady_clock::now();
+    // 时间戳 (纳秒) — 使用 system_clock 与原始 robot_mujoco 保持一致
+    // 原始 robot_mujoco 使用 rclcpp::Clock::now() (底层为 system_clock/CLOCK_REALTIME),
+    // mc_ctrl 可能用 time_stamp 做消息新鲜度检查或状态估计时间传播.
+    // steady_clock (CLOCK_MONOTONIC) 值约 3.7e14, system_clock 值约 1.8e18,
+    // 差值约 56 年, 如果 mc_ctrl 有绝对时间检查会导致所有消息被判为过期.
+    auto now = std::chrono::system_clock::now();
     auto ns = std::chrono::duration_cast<std::chrono::nanoseconds>(
         now.time_since_epoch()).count();
     state.set_time_stamp(static_cast<uint64_t>(ns));
