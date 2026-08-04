@@ -218,6 +218,10 @@ private:
     uint64_t publish_count_ = 0;
     uint64_t udp_send_count_ = 0;
 
+    // 延迟一步的 qfrc_bias[6:17] (关节部分)
+    // mj_step 后保存, 用于下一步的重力补偿 (PASSIVE 模式也需要)
+    double prev_grav_comp_[12] = {};
+
     // GUI 状态（静态回调需要访问）
     static mjModel* s_model_;
     static mjData*  s_data_;

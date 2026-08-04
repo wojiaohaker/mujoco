@@ -609,30 +609,13 @@ void MujocoSim::WriteSharedState() {
         shared_state_.q_joint[leg * 3 + 1] = static_cast<float>(data_->qpos[qpos_idx + 1]);
         shared_state_.q_joint[leg * 3 + 2] = static_cast<float>(data_->qpos[qpos_idx + 2]);
 
+        // 直接使用原始 qvel (不使用低通滤波)
+        // 原因: alpha=0.2 的指数滤波器在 RL policy 频率(200Hz)处引入~86°相位滞后,
+        // 导致 LSTM 隐状态累积发散, 最终 policy 输出极端值.
+        // robot_mujoco 的关节速度观测器经过 RL 训练匹配, 不能用简单指数滤波替代.
         shared_state_.qd_joint[leg * 3 + 0] = static_cast<float>(data_->qvel[vel_idx + 0]);
         shared_state_.qd_joint[leg * 3 + 1] = static_cast<float>(data_->qvel[vel_idx + 1]);
         shared_state_.qd_joint[leg * 3 + 2] = static_cast<float>(data_->qvel[vel_idx + 2]);
-
-        // 关节速度低通滤波 (模拟 robot_mujoco 的关节速度观测器)
-        // 仅影响发布值，不影响内部 PD 控制
-        {
-            static double filt[12] = {};
-            static bool init = false;
-            const double alpha = 0.2;
-            int base = leg * 3;
-            if (!init) {
-                // 首次: 初始化全部12个关节
-                for (int l = 0; l < 4; l++)
-                    for (int j = 0; j < 3; j++)
-                        filt[l*3+j] = data_->qvel[6 + l*3 + j];
-                init = true;
-            } else {
-                for (int j = 0; j < 3; j++)
-                    filt[base+j] = alpha * data_->qvel[vel_idx+j] + (1.0-alpha) * filt[base+j];
-            }
-            for (int j = 0; j < 3; j++)
-                shared_state_.qd_joint[base+j] = static_cast<float>(filt[base+j]);
-        }
 
         shared_state_.tau_joint[leg * 3 + 0] = static_cast<float>(data_->sensordata[tau_idx + 0]);
         shared_state_.tau_joint[leg * 3 + 1] = static_cast<float>(data_->sensordata[tau_idx + 1]);
@@ -689,7 +672,7 @@ void MujocoSim::PhysicsStep() {
 void MujocoSim::ApplyControl() {
     std::lock_guard<std::mutex> lock(cmd_mutex_);
     if (!has_cmd_) {
-        // 无命令时: 零力矩, 让机器人自然下落 (与 robot_mujoco 一致)
+        // 无命令时: 零力矩, 让机器人自然下落
         if (model_ && data_) {
             for (int i = 0; i < model_->nu; i++) {
                 data_->ctrl[i] = 0.0;
@@ -701,7 +684,6 @@ void MujocoSim::ApplyControl() {
     const auto& cmd = latest_cmd_;
 
     // 检查 PD 是否激活 (任一 kp 非零即为激活)
-    // PASSIVE 模式发送全零命令 (kp=0), 此时不应加 qfrc_bias, 否则机器人会被向上推
     bool pd_active = false;
     for (int leg = 0; leg < 4; leg++) {
         if (cmd.kp_abad_size() > leg && cmd.kp_abad(leg) != 0.0) { pd_active = true; break; }
@@ -758,6 +740,74 @@ void MujocoSim::ApplyControl() {
                        + data_->qfrc_bias[vel_idx + 2];
             data_->ctrl[ctrl_idx + 2] = tau;
         }
+    }
+
+    // 诊断日志: 每100步输出完整控制信息
+    static FILE* diag_fp = nullptr;
+    if (!diag_fp) {
+        diag_fp = fopen("/tmp/mujoco_diag.log", "w");
+        if (diag_fp) {
+            fprintf(diag_fp, "# step time base_x base_y base_z qw qx qy qz ");
+            fprintf(diag_fp, "FR_ab_q FR_ab_qdes FR_ab_qd FR_ab_ctrl FR_ab_gcomp ");
+            fprintf(diag_fp, "FR_hi_q FR_hi_qdes FR_hi_qd FR_hi_ctrl FR_hi_gcomp ");
+            fprintf(diag_fp, "FR_kn_q FR_kn_qdes FR_kn_qd FR_kn_ctrl FR_kn_gcomp ");
+            fprintf(diag_fp, "kp_abad0 kp_hip0 kp_knee0 kd_abad0 kd_hip0 kd_knee0 ");
+            fprintf(diag_fp, "tau_ff_abad0 tau_ff_hip0 tau_ff_knee0 ");
+            fprintf(diag_fp, "v_world_x v_world_y v_world_z ");
+            fprintf(diag_fp, "gyro_x gyro_y gyro_z acc_x acc_y acc_z\n");
+        }
+    }
+    if (diag_fp && step_count_ % 100 == 0) {
+        // base state
+        fprintf(diag_fp, "%lu %.4f %.6f %.6f %.6f %.6f %.6f %.6f %.6f ",
+                (unsigned long)step_count_, data_->time,
+                data_->qpos[0], data_->qpos[1], data_->qpos[2],
+                data_->qpos[3], data_->qpos[4], data_->qpos[5], data_->qpos[6]);
+        // FR joint details (leg=0)
+        for (int j = 0; j < 3; j++) {
+            int qi = 7 + j, vi = 6 + j;
+            double qdes = 0, qdes_v = 0, tau_ff = 0, kp = 0, kd = 0;
+            if (j == 0) {
+                qdes = cmd.q_des_abad_size() > 0 ? cmd.q_des_abad(0) : 0;
+                qdes_v = cmd.qd_des_abad_size() > 0 ? cmd.qd_des_abad(0) : 0;
+                tau_ff = cmd.tau_abad_ff_size() > 0 ? cmd.tau_abad_ff(0) : 0;
+                kp = cmd.kp_abad_size() > 0 ? cmd.kp_abad(0) : 0;
+                kd = cmd.kd_abad_size() > 0 ? cmd.kd_abad(0) : 0;
+            } else if (j == 1) {
+                qdes = cmd.q_des_hip_size() > 0 ? cmd.q_des_hip(0) : 0;
+                qdes_v = cmd.qd_des_hip_size() > 0 ? cmd.qd_des_hip(0) : 0;
+                tau_ff = cmd.tau_hip_ff_size() > 0 ? cmd.tau_hip_ff(0) : 0;
+                kp = cmd.kp_hip_size() > 0 ? cmd.kp_hip(0) : 0;
+                kd = cmd.kd_hip_size() > 0 ? cmd.kd_hip(0) : 0;
+            } else {
+                qdes = cmd.q_des_knee_size() > 0 ? cmd.q_des_knee(0) : 0;
+                qdes_v = cmd.qd_des_knee_size() > 0 ? cmd.qd_des_knee(0) : 0;
+                tau_ff = 0;
+                kp = cmd.kp_knee_size() > 0 ? cmd.kp_knee(0) : 0;
+                kd = cmd.kd_knee_size() > 0 ? cmd.kd_knee(0) : 0;
+            }
+            fprintf(diag_fp, "%.6f %.6f %.6f %.6f %.6f ",
+                    data_->qpos[qi], qdes, data_->qvel[vi], data_->ctrl[vi], data_->qfrc_bias[vi]);
+        }
+        // gains and tau_ff for leg 0
+        fprintf(diag_fp, "%.2f %.2f %.2f %.2f %.2f %.2f %.4f %.4f %.4f ",
+                cmd.kp_abad_size() > 0 ? cmd.kp_abad(0) : 0.0,
+                cmd.kp_hip_size() > 0 ? cmd.kp_hip(0) : 0.0,
+                cmd.kp_knee_size() > 0 ? cmd.kp_knee(0) : 0.0,
+                cmd.kd_abad_size() > 0 ? cmd.kd_abad(0) : 0.0,
+                cmd.kd_hip_size() > 0 ? cmd.kd_hip(0) : 0.0,
+                cmd.kd_knee_size() > 0 ? cmd.kd_knee(0) : 0.0,
+                cmd.tau_abad_ff_size() > 0 ? cmd.tau_abad_ff(0) : 0.0,
+                cmd.tau_hip_ff_size() > 0 ? cmd.tau_hip_ff(0) : 0.0,
+                0.0);
+        // v_world (before conversion)
+        fprintf(diag_fp, "%.6f %.6f %.6f ",
+                shared_state_.base_linvel[0], shared_state_.base_linvel[1], shared_state_.base_linvel[2]);
+        // gyro and acc
+        fprintf(diag_fp, "%.6f %.6f %.6f %.6f %.6f %.6f\n",
+                shared_state_.imu_gyro[0], shared_state_.imu_gyro[1], shared_state_.imu_gyro[2],
+                shared_state_.imu_acc[0], shared_state_.imu_acc[1], shared_state_.imu_acc[2]);
+        fflush(diag_fp);
     }
 }
 
@@ -831,29 +881,12 @@ robot_sdk::pb::RobotState MujocoSim::BuildRobotState() {
     state.add_rpy(static_cast<float>(pitch));
     state.add_rpy(static_cast<float>(yaw));
 
-    // v_world: 将世界坐标系线速度转换为 body 坐标系
-    // framelinvel 输出世界坐标系速度, RL policy 期望 body 坐标系
-    // v_body = R^T * v_world, 其中 R 由四元数 (w,x,y,z) 定义
-    double qw = shared_state_.base_quat[0];
-    double qx = shared_state_.base_quat[1];
-    double qy = shared_state_.base_quat[2];
-    double qz = shared_state_.base_quat[3];
-    double vw_x = shared_state_.base_linvel[0];
-    double vw_y = shared_state_.base_linvel[1];
-    double vw_z = shared_state_.base_linvel[2];
-    // R^T (世界→body) 旋转
-    double vb_x = (1 - 2*(qy*qy + qz*qz)) * vw_x
-                + 2*(qx*qy + qw*qz) * vw_y
-                + 2*(qx*qz - qw*qy) * vw_z;
-    double vb_y = 2*(qx*qy - qw*qz) * vw_x
-                + (1 - 2*(qx*qx + qz*qz)) * vw_y
-                + 2*(qy*qz + qw*qx) * vw_z;
-    double vb_z = 2*(qx*qz + qw*qy) * vw_x
-                + 2*(qy*qz - qw*qx) * vw_y
-                + (1 - 2*(qx*qx + qy*qy)) * vw_z;
-    state.add_v_world(static_cast<float>(vb_x));
-    state.add_v_world(static_cast<float>(vb_y));
-    state.add_v_world(static_cast<float>(vb_z));
+    // v_world: 直接发布世界坐标系线速度 (与 robot_mujoco 一致)
+    // framelinvel 传感器输出就是世界坐标系速度, robot_mujoco 不做 body-frame 转换
+    // 字段名 "v_world" 即表示世界坐标系速度
+    state.add_v_world(static_cast<float>(shared_state_.base_linvel[0]));
+    state.add_v_world(static_cast<float>(shared_state_.base_linvel[1]));
+    state.add_v_world(static_cast<float>(shared_state_.base_linvel[2]));
 
     return state;
 }
