@@ -33,6 +33,7 @@
 #include <sys/socket.h>
 #include <unistd.h>
 
+#include <algorithm>
 #include <cstring>
 #include <fstream>
 #include <iostream>
@@ -450,7 +451,7 @@ void MujocoSim::Stop() {
 // ==================== 线程实现 ====================
 
 void MujocoSim::PhysicsThreadFunc() {
-    std::cout << "[PhysicsThread] 线程启动" << std::endl;
+    std::cout << "[PhysicsThread] 线程启动 (BUILD=v4_clamp_check)" << std::endl;
 
     const auto period = std::chrono::microseconds(
         static_cast<int64_t>(1e6 / config_.sim_rate_hz));
@@ -699,9 +700,12 @@ void MujocoSim::ApplyControl() {
         return;
     }
 
-    // PD 激活 (STANDUP / RL 模式): PD + 重力补偿
+    // PD 激活 (STANDUP / RL 模式): PD + tau_ff + qfrc_bias (重力补偿)
     // tau = kp*(q_des - q) + kd*(qd_des - qd) + tau_ff + qfrc_bias
-    mj_forward(model_, data_);
+    // qfrc_bias 包含重力项, 原始 robot_mujoco 使用 qfrc_bias 做重力补偿.
+    // RL 策略训练时假设底层有重力补偿, 否则 kp=20 无法对抗重力.
+    // 限幅 ±28 Nm (与 xgb.xml actuatorfrcrange 一致)
+    static constexpr double kMaxTorque = 28.0;
 
     for (int leg = 0; leg < 4; leg++) {
         int jnt_idx = 7 + leg * 3;   // qpos 中的关节起始索引
@@ -712,10 +716,12 @@ void MujocoSim::ApplyControl() {
         if (cmd.q_des_abad_size() > leg && cmd.kp_abad_size() > leg) {
             double q = data_->qpos[jnt_idx + 0];
             double qd = data_->qvel[vel_idx + 0];
+            double bias = data_->qfrc_bias[vel_idx + 0];
             double tau = cmd.kp_abad(leg) * (cmd.q_des_abad(leg) - q)
                        + cmd.kd_abad(leg) * (cmd.qd_des_abad_size() > leg ? cmd.qd_des_abad(leg) : 0.0 - qd)
                        + (cmd.tau_abad_ff_size() > leg ? cmd.tau_abad_ff(leg) : 0.0)
-                       + data_->qfrc_bias[vel_idx + 0];
+                       + bias;
+            tau = std::max(-kMaxTorque, std::min(kMaxTorque, tau));
             data_->ctrl[ctrl_idx + 0] = tau;
         }
 
@@ -723,10 +729,12 @@ void MujocoSim::ApplyControl() {
         if (cmd.q_des_hip_size() > leg && cmd.kp_hip_size() > leg) {
             double q = data_->qpos[jnt_idx + 1];
             double qd = data_->qvel[vel_idx + 1];
+            double bias = data_->qfrc_bias[vel_idx + 1];
             double tau = cmd.kp_hip(leg) * (cmd.q_des_hip(leg) - q)
                        + cmd.kd_hip(leg) * (cmd.qd_des_hip_size() > leg ? cmd.qd_des_hip(leg) : 0.0 - qd)
                        + (cmd.tau_hip_ff_size() > leg ? cmd.tau_hip_ff(leg) : 0.0)
-                       + data_->qfrc_bias[vel_idx + 1];
+                       + bias;
+            tau = std::max(-kMaxTorque, std::min(kMaxTorque, tau));
             data_->ctrl[ctrl_idx + 1] = tau;
         }
 
@@ -734,10 +742,12 @@ void MujocoSim::ApplyControl() {
         if (cmd.q_des_knee_size() > leg && cmd.kp_knee_size() > leg) {
             double q = data_->qpos[jnt_idx + 2];
             double qd = data_->qvel[vel_idx + 2];
+            double bias = data_->qfrc_bias[vel_idx + 2];
             double tau = cmd.kp_knee(leg) * (cmd.q_des_knee(leg) - q)
                        + cmd.kd_knee(leg) * (cmd.qd_des_knee_size() > leg ? cmd.qd_des_knee(leg) : 0.0 - qd)
                        + 0.0
-                       + data_->qfrc_bias[vel_idx + 2];
+                       + bias;
+            tau = std::max(-kMaxTorque, std::min(kMaxTorque, tau));
             data_->ctrl[ctrl_idx + 2] = tau;
         }
     }
@@ -755,6 +765,7 @@ void MujocoSim::ApplyControl() {
             fprintf(diag_fp, "tau_ff_abad0 tau_ff_hip0 tau_ff_knee0 ");
             fprintf(diag_fp, "v_world_x v_world_y v_world_z ");
             fprintf(diag_fp, "gyro_x gyro_y gyro_z acc_x acc_y acc_z\n");
+            fprintf(diag_fp, "# BUILD_MARKER=v4_clamp_check\n");
         }
     }
     if (diag_fp && step_count_ % 100 == 0) {
@@ -763,9 +774,9 @@ void MujocoSim::ApplyControl() {
                 (unsigned long)step_count_, data_->time,
                 data_->qpos[0], data_->qpos[1], data_->qpos[2],
                 data_->qpos[3], data_->qpos[4], data_->qpos[5], data_->qpos[6]);
-        // FR joint details (leg=0)
+        // FR joint details (leg=0, ctrl_idx=0)
         for (int j = 0; j < 3; j++) {
-            int qi = 7 + j, vi = 6 + j;
+            int qi = 7 + j, vi = 6 + j, ci = j;  // ci = ctrl 索引 (FR: 0,1,2)
             double qdes = 0, qdes_v = 0, tau_ff = 0, kp = 0, kd = 0;
             if (j == 0) {
                 qdes = cmd.q_des_abad_size() > 0 ? cmd.q_des_abad(0) : 0;
@@ -787,7 +798,7 @@ void MujocoSim::ApplyControl() {
                 kd = cmd.kd_knee_size() > 0 ? cmd.kd_knee(0) : 0;
             }
             fprintf(diag_fp, "%.6f %.6f %.6f %.6f %.6f ",
-                    data_->qpos[qi], qdes, data_->qvel[vi], data_->ctrl[vi], data_->qfrc_bias[vi]);
+                    data_->qpos[qi], qdes, data_->qvel[vi], data_->ctrl[ci], data_->qfrc_bias[vi]);
         }
         // gains and tau_ff for leg 0
         fprintf(diag_fp, "%.2f %.2f %.2f %.2f %.2f %.2f %.4f %.4f %.4f ",
@@ -850,12 +861,17 @@ robot_sdk::pb::RobotState MujocoSim::BuildRobotState() {
         state.add_quat(shared_state_.base_quat[i]);
     }
 
-    // 陀螺仪
+    // 陀螺仪: 直接发送世界坐标系角速度
+    // 原始 robot_mujoco 直接发送 MuJoCo 传感器的世界坐标系数据,
+    // mc_ctrl RL 策略训练时接收世界坐标系角速度.
+    // 之前的 R^T 体坐标系转换是错误的, 会导致策略在倾斜时收到错误数据.
     for (int i = 0; i < 3; i++) {
         state.add_gyro(shared_state_.imu_gyro[i]);
     }
 
-    // 加速度计
+    // 加速度计: 直接发送世界坐标系加速度
+    // 原始 robot_mujoco 直接发送 MuJoCo 传感器的世界坐标系数据 (含重力),
+    // mc_ctrl RL 策略训练时接收世界坐标系加速度.
     for (int i = 0; i < 3; i++) {
         state.add_acc(shared_state_.imu_acc[i]);
     }
@@ -881,12 +897,13 @@ robot_sdk::pb::RobotState MujocoSim::BuildRobotState() {
     state.add_rpy(static_cast<float>(pitch));
     state.add_rpy(static_cast<float>(yaw));
 
-    // v_world: 直接发布世界坐标系线速度 (与 robot_mujoco 一致)
-    // framelinvel 传感器输出就是世界坐标系速度, robot_mujoco 不做 body-frame 转换
-    // 字段名 "v_world" 即表示世界坐标系速度
-    state.add_v_world(static_cast<float>(shared_state_.base_linvel[0]));
-    state.add_v_world(static_cast<float>(shared_state_.base_linvel[1]));
-    state.add_v_world(static_cast<float>(shared_state_.base_linvel[2]));
+    // v_world: 直接发送世界坐标系线速度
+    // 与原始 Matrix/CarlaUnreal 保持一致: UE 端从 cvel 读取世界系速度直接发送,
+    // mc_ctrl 和 RL 策略期望接收世界坐标系速度.
+    // 之前的 v_world→v_body 转换是错误的, 会导致策略收到虚假侧向速度.
+    state.add_v_world(shared_state_.base_linvel[0]);
+    state.add_v_world(shared_state_.base_linvel[1]);
+    state.add_v_world(shared_state_.base_linvel[2]);
 
     return state;
 }
