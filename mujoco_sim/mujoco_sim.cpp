@@ -756,6 +756,7 @@ robot_sdk::pb::RobotState MujocoSim::BuildRobotState() {
         state.add_qd_abad(shared_state_.qd_joint[leg * 3 + 0]);
         state.add_qd_hip(shared_state_.qd_joint[leg * 3 + 1]);
         state.add_qd_knee(shared_state_.qd_joint[leg * 3 + 2]);
+        state.add_qd_foot(0.0f);
     }
 
     // 关节力矩
