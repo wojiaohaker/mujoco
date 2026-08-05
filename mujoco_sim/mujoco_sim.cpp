@@ -90,6 +90,12 @@ SimConfig SimConfig::LoadFromFile(const std::string& path) {
             cfg.enable_udp = (value == "1" || value == "true");
         } else if (key == "enable_ecal") {
             cfg.enable_ecal = (value == "1" || value == "true");
+        } else if (key == "enable_ros2") {
+            cfg.enable_ros2 = (value == "1" || value == "true");
+        } else if (key == "ros2_odom_topic") {
+            cfg.ros2_odom_topic = value;
+        } else if (key == "ros2_odom_rate_hz") {
+            cfg.ros2_odom_rate_hz = std::stod(value);
         } else if (key == "sim_rate_hz") {
             cfg.sim_rate_hz = std::stod(value);
         } else if (key == "publish_rate_hz") {
@@ -130,6 +136,7 @@ MujocoSim::~MujocoSim() {
     // 等待线程结束
     if (physics_thread_.joinable()) physics_thread_.join();
     if (bridge_thread_.joinable())  bridge_thread_.join();
+    if (ros2_spin_thread_.joinable()) ros2_spin_thread_.join();
     if (udp_sock_ >= 0) {
         close(udp_sock_);
     }
@@ -170,6 +177,21 @@ bool MujocoSim::Initialize(const SimConfig& config) {
             std::cerr << "[UDP] 初始化失败，禁用 UDP 输出" << std::endl;
             config_.enable_udp = false;
         }
+    }
+
+    // 4. 初始化 ROS 2 odom 发布
+    if (config_.enable_ros2) {
+        ros2_node_ = rclcpp::Node::make_shared("mujoco_sim");
+        ros2_odom_pub_ = ros2_node_->create_publisher<nav_msgs::msg::Odometry>(
+            config_.ros2_odom_topic, rclcpp::QoS(10));
+
+        // 启动 spin 线程 (ROS 2 通信需要)
+        ros2_spin_thread_ = std::thread([this]() {
+            rclcpp::spin(ros2_node_);
+        });
+
+        std::cout << "[ROS2] 初始化完成: odom_topic=" << config_.ros2_odom_topic
+                  << ", rate=" << config_.ros2_odom_rate_hz << "Hz" << std::endl;
     }
 
     return true;
@@ -485,8 +507,10 @@ void MujocoSim::CarlaSdkBridgeThreadFunc() {
     std::cout << "[CarlaSdkBridgeThread] 线程启动" << std::endl;
     std::cout << "[CarlaSdkBridgeThread] eCAL=" << (config_.enable_ecal ? "ON" : "OFF")
               << ", UDP=" << (config_.enable_udp ? "ON" : "OFF")
+              << ", ROS2=" << (config_.enable_ros2 ? "ON" : "OFF")
               << ", eCAL_rate=" << config_.publish_rate_hz
-              << ", UDP_rate=" << config_.udp_rate_hz << std::endl;
+              << ", UDP_rate=" << config_.udp_rate_hz
+              << ", ROS2_odom_rate=" << config_.ros2_odom_rate_hz << std::endl;
 
     // 等待首次物理数据就绪
     {
@@ -503,9 +527,12 @@ void MujocoSim::CarlaSdkBridgeThreadFunc() {
     const auto ecal_period_us = static_cast<int64_t>(1e6 / config_.publish_rate_hz);
     // UDP 发送周期
     const auto udp_period_us = static_cast<int64_t>(1e6 / config_.udp_rate_hz);
+    // ROS 2 odom发布周期
+    const auto ros2_odom_period_us = static_cast<int64_t>(1e6 / config_.ros2_odom_rate_hz);
 
     auto next_ecal_time = std::chrono::steady_clock::now();
     auto next_udp_time  = std::chrono::steady_clock::now();
+    auto next_ros2_odom_time = std::chrono::steady_clock::now();
     uint64_t last_seq = 0;
 
     while (running_.load()) {
@@ -613,13 +640,78 @@ void MujocoSim::CarlaSdkBridgeThreadFunc() {
             }
         }
 
+        // ROS 2 odom发布 (ros2_odom_rate_hz, 默认 50Hz)
+        if (config_.enable_ros2 && has_new_state && now >= next_ros2_odom_time) {
+            next_ros2_odom_time += std::chrono::microseconds(ros2_odom_period_us);
+            if (next_ros2_odom_time < now) next_ros2_odom_time = now;
+
+            if (ros2_odom_pub_) {
+                nav_msgs::msg::Odometry odom;
+
+                // 时间戳
+                auto ros_now = ros2_node_->now();
+                odom.header.stamp = ros_now;
+                odom.header.frame_id = "world";
+                odom.child_frame_id = "base_link";
+
+                // Pose (世界坐标系)
+                odom.pose.pose.position.x = shared_state_.base_position[0];
+                odom.pose.pose.position.y = shared_state_.base_position[1];
+                odom.pose.pose.position.z = shared_state_.base_position[2];
+                odom.pose.pose.orientation.w = shared_state_.base_quat[0];
+                odom.pose.pose.orientation.x = shared_state_.base_quat[1];
+                odom.pose.pose.orientation.y = shared_state_.base_quat[2];
+                odom.pose.pose.orientation.z = shared_state_.base_quat[3];
+
+                // Twist: 将世界坐标系线速度转换到体坐标系 (ROS Odometry 惯例)
+                // v_body = R^T * v_world, R 从四元数构建
+                double vx = shared_state_.base_linvel[0];
+                double vy = shared_state_.base_linvel[1];
+                double vz = shared_state_.base_linvel[2];
+                double qw = shared_state_.base_quat[0];
+                double qx = shared_state_.base_quat[1];
+                double qy = shared_state_.base_quat[2];
+                double qz = shared_state_.base_quat[3];
+                // R^T (世界→体) 旋转矩阵元素
+                double r00 = 1 - 2*(qy*qy + qz*qz);
+                double r01 = 2*(qx*qy + qw*qz);
+                double r02 = 2*(qx*qz - qw*qy);
+                double r10 = 2*(qx*qy - qw*qz);
+                double r11 = 1 - 2*(qx*qx + qz*qz);
+                double r12 = 2*(qy*qz + qw*qx);
+                double r20 = 2*(qx*qz + qw*qy);
+                double r21 = 2*(qy*qz - qw*qx);
+                double r22 = 1 - 2*(qx*qx + qy*qy);
+                odom.twist.twist.linear.x = r00*vx + r01*vy + r02*vz;
+                odom.twist.twist.linear.y = r10*vx + r11*vy + r12*vz;
+                odom.twist.twist.linear.z = r20*vx + r21*vy + r22*vz;
+
+                // 角速度: 使用 imu_gyro (体坐标系, WriteSharedState 中从 cvel+R^T 计算)
+                odom.twist.twist.angular.x = shared_state_.imu_gyro[0];
+                odom.twist.twist.angular.y = shared_state_.imu_gyro[1];
+                odom.twist.twist.angular.z = shared_state_.imu_gyro[2];
+
+                ros2_odom_pub_->publish(odom);
+                ros2_odom_count_++;
+
+                if (ros2_odom_count_ % 50 == 1) {
+                    std::cout << "[ROS2] odom #" << ros2_odom_count_
+                              << " pos=(" << odom.pose.pose.position.x
+                              << "," << odom.pose.pose.position.y
+                              << "," << odom.pose.pose.position.z << ")"
+                              << std::endl;
+                }
+            }
+        }
+
         // 避免忙等: 睡到下一个最近的事件
-        auto next_event = std::min(next_ecal_time, next_udp_time);
+        auto next_event = std::min({next_ecal_time, next_udp_time, next_ros2_odom_time});
         std::this_thread::sleep_until(next_event);
     }
 
     std::cout << "[CarlaSdkBridgeThread] 线程结束, eCAL_pub=" << publish_count_
-              << ", udp_send=" << udp_send_count_ << std::endl;
+              << ", udp_send=" << udp_send_count_
+              << ", ros2_odom=" << ros2_odom_count_ << std::endl;
 }
 
 void MujocoSim::WriteSharedState() {

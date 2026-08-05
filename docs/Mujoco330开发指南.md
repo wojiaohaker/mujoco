@@ -514,3 +514,167 @@ MJX 将 MuJoCo 仿真管线移植到 JAX，支持 GPU/TPU 批量并行仿真，�
 8. **VFS**：虚拟文件系统用于从内存加载资源（纹理/网格），避免磁盘I/O
 9. **全局缓存**：用户层维护 500MB 模型缓存（`user_api.cc`）
 10. **版本常量**：`mjVERSION = 330`（`engine_support.c`），用于二进制兼容性检查
+
+
+
+
+
+
+
+现在我对代码结构完全清楚了。来规划实现：
+
+
+先确认 ROS 2 环境可用：
+
+
+现在开始实现。先改 CMakeLists.txt：
+
+
+现在开始实现所有改动：
+
+
+现在更新 `mujoco_sim.h`：
+
+
+现在更新 `mujoco_sim.cpp`：
+
+
+现在在 `CarlaSdkBridgeThreadFunc` 中添加 odom 发布逻辑：
+
+
+现在在 UDP 发送逻辑之后插入 ROS 2 odom 发布代码：
+
+
+让我检查文件当前状态，确认大括号是否正确：
+
+
+结构正确。现在更新 `main.cpp` 添加 `rclcpp::init/shutdown`，同时修复角速度用 `imu_gyro`（体坐标系）而非 0：
+
+
+现在更新 `main.cpp` 添加 `rclcpp::init/shutdown`：
+
+
+现在编译：
+
+
+CMake 配置成功，开始编译：
+
+
+编译成功！检查 config.yaml 是否需要更新：
+
+
+全部完成！编译通过。
+
+---
+
+**改动总结：**
+
+**1. [CMakeLists.txt](file:///home/qiyuan/Softwares/Mujoco330/mujoco_sim/CMakeLists.txt)**
+- 添加 `find_package(rclcpp/nav_msgs/geometry_msgs/std_msgs)`
+- 链接 `rclcpp::rclcpp` 和 `${nav_msgs_TARGETS}`
+
+**2. [mujoco_sim.h](file:///home/qiyuan/Softwares/Mujoco330/mujoco_sim/mujoco_sim.h)**
+- `SimConfig` 新增：`enable_ros2`、`ros2_odom_topic`（默认 `/odom/mujoco_odom`）、`ros2_odom_rate_hz`（默认 50Hz）
+- `MujocoSim` 新增：`ros2_node_`、`ros2_odom_pub_`、`ros2_spin_thread_`、`ros2_odom_count_`
+
+**3. [mujoco_sim.cpp](file:///home/qiyuan/Softwares/Mujoco330/mujoco_sim/mujoco_sim.cpp)**
+- `Initialize()` 中创建 ROS 2 节点 + 发布者 + spin 线程
+- `CarlaSdkBridgeThreadFunc` 中新增 odom 发布逻辑（50Hz）：
+  - **pose**: `base_position` + `base_quat`（世界坐标系）
+  - **twist.linear**: `base_linvel` 经 R^T 变换到体坐标系（ROS Odometry 惯例）
+  - **twist.angular**: 使用 `imu_gyro`（体坐标系角速度）
+- 析构函数中 join spin 线程
+
+**4. [main.cpp](file:///home/qiyuan/Softwares/Mujoco330/mujoco_sim/main.cpp)**
+- 添加 `rclcpp::init(argc, argv)` 和 `rclcpp::shutdown()`
+
+**5. [config.yaml](file:///home/qiyuan/Softwares/Mujoco330/mujoco_sim/config.yaml)**
+- 新增 ROS 2 配置段
+
+**编译命令**（需先 source ROS 2）：
+```bash
+source /opt/ros/humble/setup.bash
+cd /home/qiyuan/Softwares/Mujoco330/mujoco_sim/build
+cmake .. && make -j$(nproc)
+```
+
+**数据流**：
+```
+mujoco_sim (500Hz物理)
+    ├── eCAL → mc_ctrl (500Hz)
+    ├── UDP 9999 → CarlaUnreal (100Hz)
+    └── ROS 2 /odom/mujoco_odom → genisom_roamerx_open (50Hz) ← 新增
+```
+
+
+
+
+
+
+
+
+
+话题存在。检查是否有实际数据在发布：
+
+
+话题存在但**没有数据在发布**（echo 超时未收到数据）。检查 mujoco_sim 是否在运行以及其 RMW 配置：
+
+
+mujoco_sim 在运行但没有发布 odom 数据。检查 mujoco_sim 终端输出：
+
+
+找到问题了！mujoco_sim 进程**没有设置 `RMW_IMPLEMENTATION` 和 `ROS_DOMAIN_ID`**：
+
+- mujoco_sim：默认 FastDDS，DOMAIN_ID=0
+- genisom_roamerx_open：`rmw_zenoh_cpp`，DOMAIN_ID=89
+
+**两者不在同一个 ROS 2 网络上，数据无法互通。**
+
+需要重启 mujoco_sim 并设置正确的环境变量：
+
+```bash
+# 先停掉当前 mujoco_sim (Ctrl+C)
+
+# 然后带环境变量启动：
+source /opt/ros/humble/setup.bash
+export RMW_IMPLEMENTATION=rmw_zenoh_cpp
+export ROS_DOMAIN_ID=89
+cd /home/qiyuan/Softwares/Mujoco330/mujoco_sim
+./build/mujoco_sim config.yaml
+```
+
+或者，也可以修改 mujoco_sim 让它在代码内部强制设置这些参数（这样就不依赖外部环境变量）。你想用哪种方式？
+
+**推荐方案**：在 `main.cpp` 的 `rclcpp::init()` 之前用 `setenv()` 强制设置，这样无论怎么启动都能正确工作：
+
+
+重新编译：
+
+
+编译成功。**问题根因**：mujoco_sim 启动时没有 `RMW_IMPLEMENTATION=rmw_zenoh_cpp` 和 `ROS_DOMAIN_ID=89`，导致与 genisom_roamerx_open 不在同一个 ROS 2 网络。
+
+**修复**：在 `main.cpp` 中 `rclcpp::init()` 之前自动设置这两个环境变量（若未设置）。
+
+现在需要**重启 mujoco_sim**：
+
+```bash
+# 1. 停掉当前 mujoco_sim (在它的终端按 Ctrl+C)
+
+# 2. 确保 Zenoh 路由器在运行 (另一个终端)
+source /opt/ros/humble/setup.bash
+export RMW_IMPLEMENTATION=rmw_zenoh_cpp
+ros2 run rmw_zenoh_cpp rmw_zenohd
+
+# 3. 重新启动 mujoco_sim
+cd /home/qiyuan/Softwares/Mujoco330/mujoco_sim
+./build/mujoco_sim config.yaml
+```
+
+启动后你应该看到：
+```
+[ROS2] 设置 RMW_IMPLEMENTATION=rmw_zenoh_cpp
+[ROS2] 设置 ROS_DOMAIN_ID=89
+[ROS2] 初始化完成: odom_topic=/odom/mujoco_odom, rate=50Hz
+```
+
+然后 genisom_roamerx_open 的 TfManager 应该不再报 "All odom data buffer are empty" 了。

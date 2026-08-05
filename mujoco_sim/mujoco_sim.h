@@ -39,6 +39,10 @@
 // protobuf (系统安装: /usr/include/robot_sdk.pb.h)
 #include <robot_sdk.pb.h>
 
+// ROS 2 (发布 /odom/mujoco_odom)
+#include <rclcpp/rclcpp.hpp>
+#include <nav_msgs/msg/odometry.hpp>
+
 namespace mujoco_sim {
 
 // ==================== 配置 ====================
@@ -54,6 +58,11 @@ struct SimConfig {
     int         udp_target_port  = 9999;   // CarlaUnreal 监听此端口 (与 Matrix 一致)
     bool        enable_udp       = true;
     bool        enable_ecal      = true;
+
+    // ROS 2 (发布里程计)
+    bool        enable_ros2      = true;
+    std::string ros2_odom_topic  = "/odom/mujoco_odom";
+    double      ros2_odom_rate_hz = 50.0;  // 与 robot_mujoco 一致 (50Hz)
 
     // 仿真参数
     double      sim_rate_hz      = 500.0;  // 物理步进频率
@@ -163,7 +172,7 @@ private:
 
     /**
      * @brief 通信桥接线程 (参考 Matrix ZsibotSdkBridgeThread)
-     * 读取 SharedState → eCAL 发布 + UDP 发送给 CarlaUE5
+     * 读取 SharedState → eCAL 发布 + UDP 发送给 CarlaUE5 + ROS 2 odom
      */
     void CarlaSdkBridgeThreadFunc();
 
@@ -209,6 +218,11 @@ private:
     std::unique_ptr<eCAL::protobuf::CPublisher<robot_sdk::pb::RobotState>> ecal_pub_;
     std::unique_ptr<eCAL::protobuf::CSubscriber<robot_sdk::pb::RobotCmd>>  ecal_sub_;
 
+    // ROS 2 (里程计发布)
+    rclcpp::Node::SharedPtr       ros2_node_;
+    rclcpp::Publisher<nav_msgs::msg::Odometry>::SharedPtr ros2_odom_pub_;
+    std::thread                     ros2_spin_thread_;
+
     // UDP
     int udp_sock_ = -1;
     struct sockaddr_in udp_dest_;
@@ -217,6 +231,7 @@ private:
     uint64_t step_count_ = 0;
     uint64_t publish_count_ = 0;
     uint64_t udp_send_count_ = 0;
+    uint64_t ros2_odom_count_ = 0;
 
     // 延迟一步的 qfrc_bias[6:17] (关节部分)
     // mj_step 后保存, 用于下一步的重力补偿 (PASSIVE 模式也需要)

@@ -26,6 +26,13 @@ find_package(glfw3 REQUIRED
 # 头文件: /usr/include/ecal/
 # 库: /lib/libecal_core.so, /lib/libecal_core_pb.so
 
+# ROS 2 (可选, 发布 /odom/mujoco_odom)
+# 编译前需 source /opt/ros/humble/setup.bash
+find_package(rclcpp REQUIRED)
+find_package(nav_msgs REQUIRED)
+find_package(geometry_msgs REQUIRED)
+find_package(std_msgs REQUIRED)
+
 # ===== 目标 =====
 
 add_executable(mujoco_sim
@@ -47,6 +54,8 @@ target_link_libraries(mujoco_sim PRIVATE
   robot_sdk                   # /lib/librobot_sdk.so (protobuf 消息定义)
   glfw
   Threads::Threads
+  rclcpp::rclcpp              # ROS 2
+  ${nav_msgs_TARGETS}         # nav_msgs::msg::Odometry
 )
 
 # ===== 安装 =====

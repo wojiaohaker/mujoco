@@ -30,3 +30,10 @@ publish_rate_hz: 500
 
 # UDP 渲染状态发送频率 (Hz) — 发送给 CarlaUE5 (与 Matrix ZsibotSdkBridge ~100Hz 一致)
 udp_rate_hz: 100
+
+# ===== ROS 2 配置 =====
+
+# ROS 2 里程计发布 (发布 /odom/mujoco_odom, 供 genisom_roamerx_open 导航栈使用)
+enable_ros2: 1
+ros2_odom_topic: "/odom/mujoco_odom"
+ros2_odom_rate_hz: 50   # 与 robot_mujoco 一致 (50Hz)

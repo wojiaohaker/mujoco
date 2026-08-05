@@ -12,8 +12,12 @@
 #include "mujoco_sim.h"
 
 #include <csignal>
+#include <cstdlib>
 #include <iostream>
 #include <string>
+
+// ROS 2
+#include <rclcpp/rclcpp.hpp>
 
 // 全局仿真器指针（用于信号处理）
 static mujoco_sim::MujocoSim* g_sim = nullptr;
@@ -30,6 +34,19 @@ int main(int argc, char* argv[]) {
     std::cout << "  mujoco_sim - MuJoCo Physics Server" << std::endl;
     std::cout << "  (替代 Matrix robot_mujoco)" << std::endl;
     std::cout << "========================================" << std::endl;
+
+    // 初始化 ROS 2 (mujoco_sim 发布 /odom/mujoco_odom 等话题)
+    // 确保与 genisom_roamerx_open 使用相同的 RMW 和 DOMAIN_ID
+    // 若环境变量已设置则不覆盖
+    if (!std::getenv("RMW_IMPLEMENTATION")) {
+        setenv("RMW_IMPLEMENTATION", "rmw_zenoh_cpp", 0);
+        std::cout << "[ROS2] 设置 RMW_IMPLEMENTATION=rmw_zenoh_cpp" << std::endl;
+    }
+    if (!std::getenv("ROS_DOMAIN_ID")) {
+        setenv("ROS_DOMAIN_ID", "89", 0);
+        std::cout << "[ROS2] 设置 ROS_DOMAIN_ID=89" << std::endl;
+    }
+    rclcpp::init(argc, argv);
 
     // 配置文件路径
     std::string config_path = "../config.yaml";  // 默认（与 robot_mujoco 相同）
@@ -75,5 +92,6 @@ int main(int argc, char* argv[]) {
     sim.Run();
 
     std::cout << "[Main] 退出" << std::endl;
+    rclcpp::shutdown();
     return 0;
 }
