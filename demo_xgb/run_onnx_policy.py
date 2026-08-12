@@ -170,10 +170,11 @@ class XgbPolicyRunner:
 
     def _reset_joints(self):
         """重置关节到趴下位置，身体贴近地面"""
-        # qpos: [base_pos(3), base_quat(4), joints(12)]
+        # free joint: qpos[0:3]=pos(x,y,z), qpos[3:7]=quat(w,x,y,z)
+        # hinge joints: qpos[7:19]
         self.data.qpos[7:19] = LIE_JOINT_POS
-        # 趴下时身体贴近地面 (约 0.12m)
-        self.data.qpos[2] = 0.12
+        self.data.qpos[0:3] = [0.0, 0.0, 0.12]   # 基座位置 (贴近地面)
+        self.data.qpos[3:7] = [1.0, 0.0, 0.0, 0.0]  # 四元数 (无旋转)
         mujoco.mj_forward(self.model, self.data)
 
     def _get_joint_pos_mujoco(self) -> np.ndarray:
@@ -197,6 +198,7 @@ class XgbPolicyRunner:
         - joint_vel: 12        (关节速度, Isaac Lab 顺序)
         - last_actions: 12     (上一步动作, Isaac Lab 顺序)
         """
+        # 基座四元数 (w, x, y, z) - 从 qpos 直接读取
         quat = self.data.qpos[3:7].copy()  # w, x, y, z
 
         # 基座线速度 (本体坐标系)
@@ -217,11 +219,12 @@ class XgbPolicyRunner:
         joint_pos_mj = self._get_joint_pos_mujoco()
         joint_vel_mj = self._get_joint_vel_mujoco()
 
-        joint_pos_isaac = joint_pos_mj[MUJOCO_TO_ISAAC]
-        joint_vel_isaac = joint_vel_mj[MUJOCO_TO_ISAAC]
+        # 先在 MuJoCo 顺序下计算相对偏差，再转换到 Isaac Lab 顺序
+        # STAND_JOINT_POS 是 MuJoCo 顺序（按腿分组：FAR→FBL→RAR→RBL）
+        joint_pos_rel_mj = joint_pos_mj - STAND_JOINT_POS
+        joint_pos_rel = joint_pos_rel_mj[MUJOCO_TO_ISAAC]  # 转换到 Isaac Lab 顺序
 
-        # 转换为相对默认姿态的偏差 (Isaac Lab 的 joint_pos_rel)
-        joint_pos_rel = joint_pos_isaac - STAND_JOINT_POS
+        joint_vel_isaac = joint_vel_mj[MUJOCO_TO_ISAAC]
         # joint_vel_rel = joint_vel - 0 = joint_vel (默认速度为0)
 
         # 构造观测
@@ -406,9 +409,17 @@ class XgbPolicyRunner:
             output_name = self.session.get_outputs()[0].name
             actions = self.session.run([output_name], {input_name: obs.reshape(1, -1)})[0][0]
 
+            # 调试：打印 ONNX 输出
+            print(f"[DEBUG] ONNX actions (Isaac order): {actions}")
+            print(f"[DEBUG] ONNX actions range: [{actions.min():.3f}, {actions.max():.3f}]")
+
             # 转换到 MuJoCo 顺序，更新目标位置
+            # Isaac Lab XGB action scale = 0.25（rough_env_cfg.py 第 32 行）
             actions_mj = actions[ISAAC_TO_MUJOCO]
-            self.target_pos = STAND_JOINT_POS + actions_mj
+            self.target_pos = STAND_JOINT_POS + actions_mj * 0.25
+            print(f"[DEBUG] target_pos (MuJoCo order): {self.target_pos}")
+            print(f"[DEBUG] STAND_JOINT_POS:           {STAND_JOINT_POS}")
+
             self.last_actions = actions.copy()
 
             return obs, actions
@@ -439,6 +450,7 @@ class XgbPolicyRunner:
         joint_pos = self.data.qpos[7:19]
         print(f"[初始状态]")
         print(f"  基座位置: ({base_pos[0]:.3f}, {base_pos[1]:.3f}, {base_pos[2]:.3f})")
+        print(f"  基座四元数: {self.data.qpos[3:7]}")
         print(f"  关节位置: {joint_pos}")
         print(f"  趴下姿态: {LIE_JOINT_POS}")
         print(f"  站立姿态: {STAND_JOINT_POS}")
@@ -518,8 +530,11 @@ class XgbPolicyRunner:
                 step += 1
                 if step % 50 == 0:
                     base_pos = self.data.qpos[0:3]
+                    quat = self.data.qpos[3:7]
+                    joints = self.data.qpos[7:19]
                     print(f"[Step {step}] FSM={self.fsm_state} "
-                          f"pos=({base_pos[0]:.2f}, {base_pos[1]:.2f}, {base_pos[2]:.2f})")
+                          f"pos=({base_pos[0]:.2f}, {base_pos[1]:.2f}, {base_pos[2]:.2f}) "
+                          f"quat=({quat[0]:.3f},{quat[1]:.3f},{quat[2]:.3f},{quat[3]:.3f})")
 
                 # 控制循环频率
                 elapsed = time.time() - start_time
