@@ -64,8 +64,8 @@ LIE_JOINT_POS = np.array([
     0.0,  1.4, -2.4,
 ])
 
-# 速度命令 (固定: 向前 0.5 m/s)
-VELOCITY_CMD = np.array([0.5, 0.0, 0.0])  # vx, vy, wz
+# 速度命令 (由按键动态设置)
+VELOCITY_CMD = np.array([0.0, 0.0, 0.0])  # vx, vy, wz (初始为0)
 
 # 控制频率
 CONTROL_DT = 0.02  # 50Hz (与 Isaac Lab 一致)
@@ -142,16 +142,25 @@ class XgbPolicyRunner:
         self.control_time = 0.0
         self._gravity_comp = np.zeros(12)  # 重力补偿力矩
 
-        # FSM 状态: 'PASSIVE' -> 'STANDUP' -> 'BALANCE' -> 'RL_MIX'
+        # FSM 状态: 'PASSIVE' -> 'STANDUP' -> 'BALANCE' <-> 'RL_MIX'
+        # BALANCE: 保持站立 (PD 控制, 无 ONNX)
+        # RL_MIX: ONNX 策略控制 (仅在按键时激活)
         self.fsm_state = 'PASSIVE'
         self.standup_start_time = None
         self.standup_duration = 3.0  # 站立过渡时间 (用户要求: 3s)
-        self.balance_duration = 3.0  # 站立后等待时间 (用户要求: 3s)
+        self.balance_duration = 1.0  # 站立后短暂稳定
         self._standup_gain = 0.0     # 站立增益渐进系数
 
         # 按键状态
         self.key_standup = False   # U 键：站立
         self.key_liedown = False   # Space 键：趴下
+        # 运动控制按键
+        self.key_w = False  # 前进
+        self.key_s = False  # 后退
+        self.key_a = False  # 左移
+        self.key_d = False  # 右移
+        self.key_q = False  # 左转
+        self.key_e = False  # 右转
 
         # PD 目标位置
         self.target_pos = LIE_JOINT_POS.copy()  # 初始目标：趴下姿态
@@ -294,6 +303,21 @@ class XgbPolicyRunner:
         self.data.qacc[:] = qacc_save
         self.data.qfrc_inverse[:] = qfrc_inverse_save
 
+    def _update_velocity_cmd(self):
+        """根据按键更新速度命令"""
+        vx, vy, wz = 0.0, 0.0, 0.0
+        if self.key_w: vx += 0.5
+        if self.key_s: vx -= 0.5
+        if self.key_a: vy += 0.5
+        if self.key_d: vy -= 0.5
+        if self.key_q: wz += 0.5
+        if self.key_e: wz -= 0.5
+        VELOCITY_CMD[:] = [vx, vy, wz]
+
+    def _has_movement_key(self):
+        """检查是否有运动按键按下"""
+        return self.key_w or self.key_s or self.key_a or self.key_d or self.key_q or self.key_e
+
     def _update_fsm(self):
         """FSM 状态转换"""
         if self.fsm_state == 'PASSIVE' and self.key_standup:
@@ -306,27 +330,39 @@ class XgbPolicyRunner:
             print(f"      目标关节: {self.target_pos}")
 
         elif self.fsm_state == 'STANDUP':
-            # 站立过渡完成，进入 BALANCE 等待
+            # 站立过渡完成，进入 BALANCE
             if self.data.time - self.standup_start_time >= self.standup_duration:
                 self.fsm_state = 'BALANCE'
                 self.balance_start_time = self.data.time
                 print(f"\n[FSM] STANDUP -> BALANCE (t={self.data.time:.1f}s)")
-                print(f"      保持站立 {self.balance_duration}s，稳定后再启动 ONNX")
+                print(f"      保持站立，按 W/S/A/D/Q/E 驱动 ONNX 策略")
 
         elif self.fsm_state == 'BALANCE':
-            # 等待完成后，切换到 RL 控制
-            if self.data.time - self.balance_start_time >= self.balance_duration:
+            # 有运动按键 -> 切换到 RL_MIX
+            if self._has_movement_key():
+                self._update_velocity_cmd()
                 self.fsm_state = 'RL_MIX'
                 print(f"\n[FSM] BALANCE -> RL_MIX (t={self.data.time:.1f}s)")
-                print(f"      开始 ONNX 策略控制")
+                print(f"      速度命令: vx={VELOCITY_CMD[0]:.1f}, vy={VELOCITY_CMD[1]:.1f}, wz={VELOCITY_CMD[2]:.1f}")
 
-        elif self.fsm_state == 'RL_MIX' and self.key_liedown:
-            # 按 Space 键趴下
-            self.fsm_state = 'STANDUP'  # 先回到 STANDUP 过渡
-            self.standup_start_time = self.data.time
-            self.target_pos = LIE_JOINT_POS.copy()  # 目标改为趴下
-            self.key_liedown = False
-            print(f"\n[FSM] RL_MIX -> STANDUP (趴下过渡) (t={self.data.time:.1f}s)")
+        elif self.fsm_state == 'RL_MIX':
+            # 松键 -> 回到 BALANCE
+            if not self._has_movement_key():
+                self.fsm_state = 'BALANCE'
+                VELOCITY_CMD[:] = [0.0, 0.0, 0.0]
+                print(f"\n[FSM] RL_MIX -> BALANCE (t={self.data.time:.1f}s)")
+                print(f"      松键，保持站立")
+            # 趴下
+            elif self.key_liedown:
+                self.fsm_state = 'STANDUP'
+                self.standup_start_time = self.data.time
+                self.target_pos = LIE_JOINT_POS.copy()
+                self.key_liedown = False
+                VELOCITY_CMD[:] = [0.0, 0.0, 0.0]
+                print(f"\n[FSM] RL_MIX -> STANDUP (趴下过渡) (t={self.data.time:.1f}s)")
+            # 更新速度命令（按键变化时）
+            else:
+                self._update_velocity_cmd()
 
     def _interpolate_target(self):
         """站立过渡：平滑插值关节目标 + 增益渐进"""
@@ -384,8 +420,15 @@ class XgbPolicyRunner:
         print("\n[INFO] 启动 MuJoCo 仿真")
         print("      FSM 状态: PASSIVE (趴着)")
         print("\n[控制说明]")
-        print("      U 键:     站立 (PASSIVE -> STANDUP -> RL_MIX)")
-        print("      Space 键: 趴下 (RL_MIX -> STANDUP -> PASSIVE)")
+        print("      U 键:     站立 (PASSIVE -> STANDUP -> BALANCE)")
+        print("      Space 键: 趴下")
+        print("      W 键:     前进 (vx=+0.5)")
+        print("      S 键:     后退 (vx=-0.5)")
+        print("      A 键:     左移 (vy=+0.5)")
+        print("      D 键:     右移 (vy=-0.5)")
+        print("      Q 键:     左转 (wz=+0.5)")
+        print("      E 键:     右转 (wz=-0.5)")
+        print("      松键:     保持站立 (BALANCE)")
         print("      鼠标左键拖拽: 旋转视角")
         print("      鼠标右键拖拽: 平移视角")
         print("      滚轮:         缩放")
@@ -408,14 +451,32 @@ class XgbPolicyRunner:
             if HAS_PYNPUT:
                 def on_press(key):
                     try:
-                        if key.char == 'u':
-                            self.key_standup = True
-                        elif key.char == ' ':
-                            self.key_liedown = True
+                        c = key.char
+                        if c == 'u': self.key_standup = True
+                        elif c == ' ': self.key_liedown = True
+                        elif c == 'w': self.key_w = True
+                        elif c == 's': self.key_s = True
+                        elif c == 'a': self.key_a = True
+                        elif c == 'd': self.key_d = True
+                        elif c == 'q': self.key_q = True
+                        elif c == 'e': self.key_e = True
                     except AttributeError:
                         if key == pynput_keyboard.Key.space:
                             self.key_liedown = True
-                listener = pynput_keyboard.Listener(on_press=on_press)
+
+                def on_release(key):
+                    try:
+                        c = key.char
+                        if c == 'w': self.key_w = False
+                        elif c == 's': self.key_s = False
+                        elif c == 'a': self.key_a = False
+                        elif c == 'd': self.key_d = False
+                        elif c == 'q': self.key_q = False
+                        elif c == 'e': self.key_e = False
+                    except AttributeError:
+                        pass
+
+                listener = pynput_keyboard.Listener(on_press=on_press, on_release=on_release)
                 listener.start()
                 print("[INFO] 全局键盘监听已启动 (pynput)")
             else:
