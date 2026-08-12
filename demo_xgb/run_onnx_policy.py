@@ -114,10 +114,14 @@ class XgbPolicyRunner:
         print(f"[OK] MuJoCo 模型加载成功")
         print(f"     关节数: {self.model.njnt}")
         print(f"     执行器数: {self.model.nu}")
+        print(f"     物理步长: {self.model.opt.timestep:.4f}s ({1/self.model.opt.timestep:.0f}Hz)")
 
         # 初始化状态
         self.last_actions = np.zeros(12)
         self.control_time = 0.0
+
+        # PD 目标位置 (在控制步更新，在物理步使用)
+        self.target_pos = DEFAULT_JOINT_POS.copy()
 
         # 设置初始关节位置
         self._reset_joints()
@@ -197,24 +201,16 @@ class XgbPolicyRunner:
         ])
         return R.T @ vec_world
 
-    def _apply_action(self, actions_isaac: np.ndarray):
+    def _apply_pd_control(self):
         """
-        应用动作 (PD 控制)
-
-        actions_isaac: Isaac Lab 顺序的 12 维关节位置偏移
+        在每个物理步执行 PD 控制
+        τ = Kp * (target - q) - Kd * q̇
         """
-        # 转换到 MuJoCo 顺序
-        actions_mj = actions_isaac[ISAAC_TO_MUJOCO]
+        current_pos = self.data.qpos[7:19]
+        current_vel = self.data.qvel[6:18]
 
-        # 目标位置 = 默认位置 + 偏移
-        target_pos = DEFAULT_JOINT_POS + actions_mj
-
-        # 当前关节状态
-        current_pos = self._get_joint_pos_mujoco()
-        current_vel = self._get_joint_vel_mujoco()
-
-        # PD 控制: tau = Kp * (target - current) - Kd * vel
-        tau = KP * (target_pos - current_pos) - KD * current_vel
+        # PD 控制
+        tau = KP * (self.target_pos - current_pos) - KD * current_vel
 
         # 限幅 ±28 Nm
         tau = np.clip(tau, -28.0, 28.0)
@@ -222,11 +218,23 @@ class XgbPolicyRunner:
         # 应用到执行器
         self.data.ctrl[:] = tau
 
+    def _update_target(self, actions_isaac: np.ndarray):
+        """
+        在控制步更新目标位置
+
+        actions_isaac: Isaac Lab 顺序的 12 维关节位置偏移
+        """
+        # 转换到 MuJoCo 顺序
+        actions_mj = actions_isaac[ISAAC_TO_MUJOCO]
+
+        # 目标位置 = 默认位置 + 偏移
+        self.target_pos = DEFAULT_JOINT_POS + actions_mj
+
         # 保存动作 (用于下一步观测)
         self.last_actions = actions_isaac.copy()
 
     def run_step(self):
-        """运行一步控制"""
+        """运行一步控制（仅更新目标位置，PD 在物理步执行）"""
         # 构造观测
         obs = self._get_observation()
 
@@ -235,8 +243,8 @@ class XgbPolicyRunner:
         output_name = self.session.get_outputs()[0].name
         actions = self.session.run([output_name], {input_name: obs.reshape(1, -1)})[0][0]
 
-        # 应用动作
-        self._apply_action(actions)
+        # 更新目标位置
+        self._update_target(actions)
 
         return obs, actions
 
@@ -256,11 +264,12 @@ class XgbPolicyRunner:
             while viewer.is_running():
                 start_time = time.time()
 
-                # 运行控制
+                # 控制步：运行 ONNX 推理，更新目标位置
                 obs, actions = self.run_step()
 
-                # 步进仿真 (直到达到控制周期)
+                # 物理步：每步都执行 PD 控制
                 while self.data.time < self.control_time + CONTROL_DT:
+                    self._apply_pd_control()   # ← 每个物理步都算 PD
                     mujoco.mj_step(self.model, self.data)
 
                 self.control_time = self.data.time
