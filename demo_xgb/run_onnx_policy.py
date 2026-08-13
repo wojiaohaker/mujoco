@@ -72,48 +72,22 @@ CONTROL_DT = 0.02  # 50Hz (与 Isaac Lab 一致)
 
 # ==================== 关节顺序映射 ====================
 
-# Isaac Lab 动作/观测中的关节顺序 (从 play 输出):
-# [FAR_ABAD, FBL_ABAD, RAR_ABAD, RBL_ABAD,
-#  FAR_HIP, FBL_HIP, RAR_HIP, RBL_HIP,
-#  FAR_KNEE, FBL_KNEE, RAR_KNEE, RBL_KNEE]
-
-# MuJoCo actuator 顺序 (从 xgb.xml):
+# Isaac Lab Articulation 关节顺序 (USD 深度优先遍历):
 # [FAR_ABAD, FAR_HIP, FAR_KNEE,
 #  FBL_ABAD, FBL_HIP, FBL_KNEE,
 #  RAR_ABAD, RAR_HIP, RAR_KNEE,
 #  RBL_ABAD, RBL_HIP, RBL_KNEE]
+#
+# MuJoCo qpos[7:19] / actuator 顺序 (与 MJCF 层级相同):
+# [FAR_ABAD, FAR_HIP, FAR_KNEE,
+#  FBL_ABAD, FBL_HIP, FBL_KNEE,
+#  RAR_ABAD, RAR_HIP, RAR_KNEE,
+#  RBL_ABAD, RBL_HIP, RBL_KNEE]
+#
+# 两者顺序相同 → identity 映射
 
-# Isaac Lab -> MuJoCo 映射
-ISAAC_TO_MUJOCO = np.array([
-    0,   # FAR_ABAD  -> mj[0]
-    3,   # FBL_ABAD  -> mj[3]
-    6,   # RAR_ABAD  -> mj[6]
-    9,   # RBL_ABAD  -> mj[9]
-    1,   # FAR_HIP   -> mj[1]
-    4,   # FBL_HIP   -> mj[4]
-    7,   # RAR_HIP   -> mj[7]
-    10,  # RBL_HIP   -> mj[10]
-    2,   # FAR_KNEE  -> mj[2]
-    5,   # FBL_KNEE  -> mj[5]
-    8,   # RAR_KNEE  -> mj[8]
-    11,  # RBL_KNEE  -> mj[11]
-])
-
-# MuJoCo -> Isaac Lab 映射 (反向)
-MUJOCO_TO_ISAAC = np.array([
-    0,   # mj[0] FAR_ABAD  -> isaac[0]
-    4,   # mj[1] FAR_HIP   -> isaac[4]
-    8,   # mj[2] FAR_KNEE  -> isaac[8]
-    1,   # mj[3] FBL_ABAD  -> isaac[1]
-    5,   # mj[4] FBL_HIP   -> isaac[5]
-    9,   # mj[5] FBL_KNEE  -> isaac[9]
-    2,   # mj[6] RAR_ABAD  -> isaac[2]
-    6,   # mj[7] RAR_HIP   -> isaac[6]
-    10,  # mj[8] RAR_KNEE  -> isaac[10]
-    3,   # mj[9] RBL_ABAD  -> isaac[3]
-    7,   # mj[10] RBL_HIP  -> isaac[7]
-    11,  # mj[11] RBL_KNEE -> isaac[11]
-])
+ISAAC_TO_MUJOCO = np.arange(12)  # identity
+MUJOCO_TO_ISAAC = np.arange(12)  # identity
 
 
 class XgbPolicyRunner:
@@ -409,16 +383,10 @@ class XgbPolicyRunner:
             output_name = self.session.get_outputs()[0].name
             actions = self.session.run([output_name], {input_name: obs.reshape(1, -1)})[0][0]
 
-            # 调试：打印 ONNX 输出
-            print(f"[DEBUG] ONNX actions (Isaac order): {actions}")
-            print(f"[DEBUG] ONNX actions range: [{actions.min():.3f}, {actions.max():.3f}]")
-
             # 转换到 MuJoCo 顺序，更新目标位置
             # Isaac Lab XGB action scale = 0.25（rough_env_cfg.py 第 32 行）
             actions_mj = actions[ISAAC_TO_MUJOCO]
             self.target_pos = STAND_JOINT_POS + actions_mj * 0.25
-            print(f"[DEBUG] target_pos (MuJoCo order): {self.target_pos}")
-            print(f"[DEBUG] STAND_JOINT_POS:           {STAND_JOINT_POS}")
 
             self.last_actions = actions.copy()
 
