@@ -38,9 +38,12 @@ MJCF_PATH = os.path.expanduser(
     "~/Softwares/Matrix/src/robot_mujoco/zsibot_robots/xgb/scene.xml"
 )
 
-# PD 控制参数 (对齐 Matrix)
-KP_RL = 20.0       # RL 模式 Kp
-KD_RL = 0.7        # RL 模式 Kd
+# PD 控制参数 (对齐 Isaac Lab: stiffness=25, damping=0.5)
+# 注意: Isaac Lab 用隐式 PD 积分器(dt=0.005)，有效阻尼 = kd/dt = 0.5/0.005 = 100
+# MuJoCo 用显式积分(dt=0.002)，需要 kd/dt ≈ 100 → kd = 100*0.002 = 0.2
+# 但 MuJoCo 的 PD 是显式的，需要更高阻尼来补偿稳定性差异
+KP_RL = 25.0       # RL 模式 Kp (匹配 Isaac Lab actuator stiffness)
+KD_RL = 3.0        # RL 模式 Kd (增大以补偿显式积分器的稳定性差异)
 KP_STANDUP = 150.0  # 站立模式 Kp (用户要求: 150)
 KD_STANDUP = 2.0    # 站立模式 Kd (用户要求: 2.0)
 KP_BALANCE = 300.0  # BALANCE 模式高增益 Kp (确保能克服重力)
@@ -72,22 +75,21 @@ CONTROL_DT = 0.02  # 50Hz (与 Isaac Lab 一致)
 
 # ==================== 关节顺序映射 ====================
 
-# Isaac Lab Articulation 关节顺序 (USD 深度优先遍历):
-# [FAR_ABAD, FAR_HIP, FAR_KNEE,
-#  FBL_ABAD, FBL_HIP, FBL_KNEE,
-#  RAR_ABAD, RAR_HIP, RAR_KNEE,
-#  RBL_ABAD, RBL_HIP, RBL_KNEE]
+# Isaac Lab Articulation 关节顺序 (按类型分组，从 play 终端输出确认):
+# [FAR_ABAD, FBL_ABAD, RAR_ABAD, RBL_ABAD,   ← ABAD×4
+#  FAR_HIP,  FBL_HIP,  RAR_HIP,  RBL_HIP,    ← HIP×4
+#  FAR_KNEE, FBL_KNEE, RAR_KNEE, RBL_KNEE]   ← KNEE×4
 #
-# MuJoCo qpos[7:19] / actuator 顺序 (与 MJCF 层级相同):
-# [FAR_ABAD, FAR_HIP, FAR_KNEE,
-#  FBL_ABAD, FBL_HIP, FBL_KNEE,
-#  RAR_ABAD, RAR_HIP, RAR_KNEE,
-#  RBL_ABAD, RBL_HIP, RBL_KNEE]
-#
-# 两者顺序相同 → identity 映射
+# MuJoCo qpos[7:19] / actuator 顺序 (深度优先，按腿分组):
+# [FAR_ABAD, FAR_HIP, FAR_KNEE,               ← 前右腿
+#  FBL_ABAD, FBL_HIP, FBL_KNEE,               ← 前左腿
+#  RAR_ABAD, RAR_HIP, RAR_KNEE,               ← 后右腿
+#  RBL_ABAD, RBL_HIP, RBL_KNEE]               ← 后左腿
 
-ISAAC_TO_MUJOCO = np.arange(12)  # identity
-MUJOCO_TO_ISAAC = np.arange(12)  # identity
+# MuJoCo → Isaac Lab: 从 leg-grouped 重排到 type-grouped
+MUJOCO_TO_ISAAC = np.array([0, 3, 6, 9, 1, 4, 7, 10, 2, 5, 8, 11])
+# Isaac Lab → MuJoCo: 从 type-grouped 重排到 leg-grouped
+ISAAC_TO_MUJOCO = np.array([0, 4, 8, 1, 5, 9, 2, 6, 10, 3, 7, 11])
 
 
 class XgbPolicyRunner:
@@ -383,9 +385,15 @@ class XgbPolicyRunner:
             output_name = self.session.get_outputs()[0].name
             actions = self.session.run([output_name], {input_name: obs.reshape(1, -1)})[0][0]
 
+            # 调试：打印 ONNX 输出
+            print(f"[DEBUG] ONNX actions (Isaac): [{actions.min():.3f}, {actions.max():.3f}]  "
+                  f"obs[:3]={obs[0:3].round(3)} obs[24:27]={obs[24:27].round(3)}")
+
             # 转换到 MuJoCo 顺序，更新目标位置
             # Isaac Lab XGB action scale = 0.25（rough_env_cfg.py 第 32 行）
-            actions_mj = actions[ISAAC_TO_MUJOCO]
+            # Clip actions 防止过大输出导致不稳定
+            actions_clipped = np.clip(actions, -1.0, 1.0)
+            actions_mj = actions_clipped[ISAAC_TO_MUJOCO]
             self.target_pos = STAND_JOINT_POS + actions_mj * 0.25
 
             self.last_actions = actions.copy()
