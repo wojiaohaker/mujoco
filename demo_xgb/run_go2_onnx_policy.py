@@ -402,9 +402,13 @@ class Go2PolicyRunner:
                     output_name = self.session.get_outputs()[0].name
                     actions = self.session.run([output_name], {input_name: obs.reshape(1, -1)})[0][0]
 
-                    print(f"[DEBUG] ONNX: [{actions.min():.3f}, {actions.max():.3f}]  "
+                    print(f"[DEBUG] ONNX (raw): [{actions.min():.3f}, {actions.max():.3f}]  "
                           f"lin_vel={obs[0:3].round(3)} grav={obs[6:9].round(3)} "
                           f"jpos_rel={obs[24:27].round(3)}")
+
+                    # 裁剪 ONNX 输出到 [-1, 1] (匹配训练时的动作范围)
+                    actions = np.clip(actions, -1.0, 1.0)
+                    print(f"[DEBUG] ONNX (clipped): [{actions.min():.3f}, {actions.max():.3f}]")
 
                     actions_mj = actions[ISAAC_TO_MUJOCO]
                     self.target_pos = STAND_JOINT_POS + actions_mj * 0.25
