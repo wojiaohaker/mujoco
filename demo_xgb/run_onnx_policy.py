@@ -18,12 +18,7 @@ import onnxruntime as ort
 import time
 import sys
 import os
-
-try:
-    from pynput import keyboard as pynput_keyboard
-    HAS_PYNPUT = True
-except ImportError:
-    HAS_PYNPUT = False
+import threading
 
 # ==================== 配置 ====================
 
@@ -355,48 +350,96 @@ class XgbPolicyRunner:
         print(f"  趴下姿态: {LIE_JOINT_POS}")
         print(f"  站立姿态: {STAND_JOINT_POS}")
 
-        with mujoco.viewer.launch_passive(self.model, self.data) as viewer:
-            # 禁用 MuJoCo UI（防止快捷键冲突）
-            viewer._render_ui = False
+        with mujoco.viewer.launch_passive(
+            self.model, self.data,
+            show_left_ui=False,
+            show_right_ui=False,
+        ) as viewer:
 
-            # 全局键盘监听（不依赖窗口焦点）
-            if HAS_PYNPUT:
-                def on_press(key):
+            # X11 全局按键拦截（防止与 MuJoCo 快捷键冲突）
+            # MuJoCo 的 'W'=Wireframe, 'S'=Shadow, 'E'=Equality 等
+            # 使用 XGrabKey 在根窗口拦截，按键不会到达 MuJoCo
+            from Xlib import display as x11_display, X as x11_X, XK as x11_XK
+            import queue
+
+            _key_queue = queue.Queue()
+            _x11_dpy = None
+
+            def _x11_key_grabber():
+                """X11 后台线程：拦截控制键，防止到达 MuJoCo"""
+                nonlocal _x11_dpy
+                _x11_dpy = x11_display.Display()
+                root = _x11_dpy.screen().root
+
+                keys_to_grab = {
+                    'w': x11_XK.string_to_keysym('w'),
+                    's': x11_XK.string_to_keysym('s'),
+                    'a': x11_XK.string_to_keysym('a'),
+                    'd': x11_XK.string_to_keysym('d'),
+                    'q': x11_XK.string_to_keysym('q'),
+                    'e': x11_XK.string_to_keysym('e'),
+                    'u': x11_XK.string_to_keysym('u'),
+                    'space': x11_XK.string_to_keysym('space'),
+                }
+
+                for name, keysym in keys_to_grab.items():
+                    keycode = _x11_dpy.keysym_to_keycode(keysym)
+                    # owner_events=False: 按键事件只发给 grabber，不发给 MuJoCo
+                    root.grab_key(keycode, x11_X.AnyModifier, False,
+                                  x11_X.GrabModeAsync, x11_X.GrabModeAsync)
+
+                _x11_dpy.flush()
+                print("[INFO] X11 控制键拦截已启用 (W/S/A/D/Q/E/U/Space)")
+
+                while True:
+                    event = _x11_dpy.next_event()
+                    if event.type == x11_X.KeyPress:
+                        for name, keysym in keys_to_grab.items():
+                            keycode = _x11_dpy.keysym_to_keycode(keysym)
+                            if event.detail == keycode:
+                                _key_queue.put(('press', name))
+                                break
+                    elif event.type == x11_X.KeyRelease:
+                        for name, keysym in keys_to_grab.items():
+                            keycode = _x11_dpy.keysym_to_keycode(keysym)
+                            if event.detail == keycode:
+                                _key_queue.put(('release', name))
+                                break
+
+            _grabber_thread = threading.Thread(target=_x11_key_grabber, daemon=True)
+            _grabber_thread.start()
+            time.sleep(0.3)  # 等待 X11 grab 生效
+
+            # 处理按键事件的辅助函数
+            def _process_key_events():
+                while not _key_queue.empty():
                     try:
-                        c = key.char
-                        if c == 'u': self.key_standup = True
-                        elif c == 'w': self.key_w = True
-                        elif c == 's': self.key_s = True
-                        elif c == 'a': self.key_a = True
-                        elif c == 'd': self.key_d = True
-                        elif c == 'q': self.key_q = True
-                        elif c == 'e': self.key_e = True
-                    except AttributeError:
-                        pass
-
-                def on_release(key):
-                    try:
-                        c = key.char
-                        if c == 'w': self.key_w = False
-                        elif c == 's': self.key_s = False
-                        elif c == 'a': self.key_a = False
-                        elif c == 'd': self.key_d = False
-                        elif c == 'q': self.key_q = False
-                        elif c == 'e': self.key_e = False
-                    except AttributeError:
-                        pass
-
-                listener = pynput_keyboard.Listener(on_press=on_press, on_release=on_release)
-                listener.start()
-                print("[INFO] 全局键盘监听已启动 (pynput)")
-            else:
-                listener = None
-                print("[WARN] pynput 未安装，无法使用键盘控制")
-                print("       安装: pip install pynput")
+                        event_type, key_name = _key_queue.get_nowait()
+                        if event_type == 'press':
+                            if key_name == 'u': self.key_standup = True
+                            elif key_name == 'w': self.key_w = True
+                            elif key_name == 's': self.key_s = True
+                            elif key_name == 'a': self.key_a = True
+                            elif key_name == 'd': self.key_d = True
+                            elif key_name == 'q': self.key_q = True
+                            elif key_name == 'e': self.key_e = True
+                            elif key_name == 'space': self.key_liedown = True
+                        elif event_type == 'release':
+                            if key_name == 'w': self.key_w = False
+                            elif key_name == 's': self.key_s = False
+                            elif key_name == 'a': self.key_a = False
+                            elif key_name == 'd': self.key_d = False
+                            elif key_name == 'q': self.key_q = False
+                            elif key_name == 'e': self.key_e = False
+                    except queue.Empty:
+                        break
 
             step = 0
             while viewer.is_running():
                 start_time = time.time()
+
+                # 处理 X11 按键事件
+                _process_key_events()
 
                 # FSM 状态转换
                 self._update_fsm()
@@ -447,9 +490,12 @@ class XgbPolicyRunner:
 
         print("\n[INFO] 仿真结束")
 
-        # 清理键盘监听
-        if HAS_PYNPUT and listener is not None:
-            listener.stop()
+        # 清理 X11 grab（关闭连接会自动释放所有 grab）
+        if _x11_dpy is not None:
+            try:
+                _x11_dpy.close()
+            except Exception:
+                pass
 
 
 def main():
