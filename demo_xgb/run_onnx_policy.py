@@ -18,7 +18,6 @@ import onnxruntime as ort
 import time
 import sys
 import os
-import threading
 
 try:
     from pynput import keyboard as pynput_keyboard
@@ -43,9 +42,8 @@ KP_RL = 20.0       # RL 模式 Kp (匹配 Isaac Lab XGB_ACTUATOR_CFG.stiffness)
 KD_RL = 0.7        # RL 模式 Kd (匹配 Isaac Lab XGB_ACTUATOR_CFG.damping)
 KP_STANDUP = 150.0  # 站立模式 Kp (用户要求: 150)
 KD_STANDUP = 2.0    # 站立模式 Kd (用户要求: 2.0)
-KP_BALANCE = 300.0  # BALANCE 模式高增益 Kp (确保能克服重力)
-KD_BALANCE = 5.0    # BALANCE 模式高增益 Kd
-STANDUP_GAIN_RAMP_DURATION = 1.0  # 增益渐进时间 (用户要求: 1.0s)
+STANDUP_GAIN_RAMP_DURATION = 1.0  # 增益渐进时间 (1.0s)
+ACTION_SCALE = 0.25  # Isaac Lab action scale
 
 # 默认关节位置 (对齐 Matrix)
 # 站立姿态: ABAD=0, HIP=0.8, KNEE=-1.5
@@ -117,15 +115,11 @@ class XgbPolicyRunner:
         # 初始化状态
         self.last_actions = np.zeros(12)
         self.control_time = 0.0
-        self._gravity_comp = np.zeros(12)  # 重力补偿力矩
 
         # FSM 状态: 'PASSIVE' -> 'STANDUP' -> 'BALANCE' <-> 'RL_MIX'
-        # BALANCE: 保持站立 (PD 控制, 无 ONNX)
-        # RL_MIX: ONNX 策略控制 (仅在按键时激活)
         self.fsm_state = 'PASSIVE'
         self.standup_start_time = None
-        self.standup_duration = 3.0  # 站立过渡时间 (用户要求: 3s)
-        self.balance_duration = 1.0  # 站立后短暂稳定
+        self.standup_duration = 3.0  # 站立过渡总时间 (Phase A=1s + Phase B=2s)
         self._standup_gain = 0.0     # 站立增益渐进系数
 
         # 按键状态
@@ -184,8 +178,8 @@ class XgbPolicyRunner:
         base_lin_vel = self._world_to_body(base_lin_vel_world, quat)
 
         # 基座角速度 (本体坐标系)
-        base_ang_vel_world = self.data.qvel[3:6].copy()
-        base_ang_vel = self._world_to_body(base_ang_vel_world, quat)
+        # MuJoCo free joint 的 qvel[3:6] 已在本体坐标系，无需转换。
+        base_ang_vel = self.data.qvel[3:6].copy()
 
         # 重力投影 (本体坐标系)
         gravity_world = np.array([0, 0, -1])
@@ -232,9 +226,7 @@ class XgbPolicyRunner:
     def _apply_pd_control(self, kp=None, kd=None):
         """
         在每个物理步执行 PD 控制
-        τ = Kp * (target - q) - Kd * q̇ + gravity_compensation
-        
-        gravity_comp 由每个控制步开始时计算，这里直接复用。
+        τ = Kp * (target - q) - Kd * q̇
         """
         if kp is None:
             kp = KP_RL
@@ -244,44 +236,14 @@ class XgbPolicyRunner:
         current_pos = self.data.qpos[7:19]
         current_vel = self.data.qvel[6:18]
 
-        # PD 控制 + 重力补偿（每个控制步计算一次，物理子步复用）
+        # Isaac Lab 训练侧的 implicit PD 没有额外的重力补偿项。
         tau = kp * (self.target_pos - current_pos) - kd * current_vel
-        tau += self._gravity_comp
 
         # 限幅 ±28 Nm
         tau = np.clip(tau, -28.0, 28.0)
 
         # 应用到执行器
         self.data.ctrl[:] = tau
-
-    def _compute_gravity_compensation(self):
-        """
-        在每个控制步开始时计算重力补偿力矩。
-        使用 mj_inverse: 设 qacc=0, 返回维持当前姿态所需的力矩 = C(q,qdot) + g(q)
-        
-        注意：只在 RL_MIX 阶段调用，避免在不稳定姿态下计算错误补偿。
-        """
-        if self.fsm_state != 'RL_MIX':
-            # 非 RL 阶段不计算重力补偿
-            return
-
-        # 保存可能被 mj_inverse 修改的状态
-        qacc_save = self.data.qacc.copy()
-        qfrc_inverse_save = self.data.qfrc_inverse.copy()
-
-        # 设目标加速度为 0
-        self.data.qacc[:] = 0.0
-
-        # 逆动力学：qfrc_inverse = M*qacc + C(q,qdot) + g(q)
-        # 当 qacc=0 时: qfrc_inverse = C(q,qdot) + g(q)
-        mujoco.mj_inverse(self.model, self.data)
-
-        # 保存关节部分的重力补偿力矩
-        self._gravity_comp = self.data.qfrc_inverse[6:18].copy()
-
-        # 恢复状态（避免影响后续 mj_step）
-        self.data.qacc[:] = qacc_save
-        self.data.qfrc_inverse[:] = qfrc_inverse_save
 
     def _update_velocity_cmd(self):
         """根据按键更新速度命令"""
@@ -301,24 +263,19 @@ class XgbPolicyRunner:
     def _update_fsm(self):
         """FSM 状态转换"""
         if self.fsm_state == 'PASSIVE' and self.key_standup:
-            # 按 U 键开始站立
             self.fsm_state = 'STANDUP'
             self.standup_start_time = self.data.time
             self.target_pos = STAND_JOINT_POS.copy()
             self.key_standup = False
             print(f"\n[FSM] PASSIVE -> STANDUP (t={self.data.time:.1f}s)")
-            print(f"      目标关节: {self.target_pos}")
 
         elif self.fsm_state == 'STANDUP':
-            # 站立过渡完成，进入 BALANCE
             if self.data.time - self.standup_start_time >= self.standup_duration:
                 self.fsm_state = 'BALANCE'
-                self.balance_start_time = self.data.time
                 print(f"\n[FSM] STANDUP -> BALANCE (t={self.data.time:.1f}s)")
                 print(f"      保持站立，按 W/S/A/D/Q/E 驱动 ONNX 策略")
 
         elif self.fsm_state == 'BALANCE':
-            # 有运动按键 -> 切换到 RL_MIX
             if self._has_movement_key():
                 self._update_velocity_cmd()
                 self.fsm_state = 'RL_MIX'
@@ -326,13 +283,10 @@ class XgbPolicyRunner:
                 print(f"      速度命令: vx={VELOCITY_CMD[0]:.1f}, vy={VELOCITY_CMD[1]:.1f}, wz={VELOCITY_CMD[2]:.1f}")
 
         elif self.fsm_state == 'RL_MIX':
-            # 松键 -> 回到 BALANCE
             if not self._has_movement_key():
                 self.fsm_state = 'BALANCE'
                 VELOCITY_CMD[:] = [0.0, 0.0, 0.0]
                 print(f"\n[FSM] RL_MIX -> BALANCE (t={self.data.time:.1f}s)")
-                print(f"      松键，保持站立")
-            # 趴下
             elif self.key_liedown:
                 self.fsm_state = 'STANDUP'
                 self.standup_start_time = self.data.time
@@ -340,69 +294,40 @@ class XgbPolicyRunner:
                 self.key_liedown = False
                 VELOCITY_CMD[:] = [0.0, 0.0, 0.0]
                 print(f"\n[FSM] RL_MIX -> STANDUP (趴下过渡) (t={self.data.time:.1f}s)")
-            # 更新速度命令（按键变化时）
             else:
                 self._update_velocity_cmd()
 
     def _interpolate_target(self):
         """站立过渡：平滑插值关节目标 + 增益渐进"""
-        if self.fsm_state != 'STANDUP':
-            return
-
-        # 计算插值进度 (0~1)
         elapsed = self.data.time - self.standup_start_time
         progress = min(elapsed / self.standup_duration, 1.0)
-
         # 平滑插值 (ease-in-out)
         t = progress * progress * (3 - 2 * progress)
-
         # 从趴下姿态插值到站立姿态
         self.target_pos = LIE_JOINT_POS + t * (STAND_JOINT_POS - LIE_JOINT_POS)
-
         # 增益渐进：前 1 秒从 0 线性增长到 1.0
         gain_progress = min(elapsed / STANDUP_GAIN_RAMP_DURATION, 1.0)
         self._standup_gain = gain_progress
 
-    def run_step(self):
-        """运行一步控制"""
-        # FSM 状态转换
-        self._update_fsm()
+    def _infer_policy(self):
+        """以 Isaac Lab 的观测和关节顺序运行一次策略。"""
+        obs = self._get_observation()
+        input_name = self.session.get_inputs()[0].name
+        output_name = self.session.get_outputs()[0].name
+        actions = self.session.run(
+            [output_name], {input_name: obs.reshape(1, -1)}
+        )[0][0]
+        if not np.all(np.isfinite(actions)):
+            raise RuntimeError(f"ONNX 输出包含非有限值: {actions}")
 
-        if self.fsm_state == 'STANDUP':
-            # 站立过渡：插值目标位置
-            self._interpolate_target()
-            return None, None
-
-        elif self.fsm_state == 'BALANCE':
-            # 保持站立姿态，PD 稳定
-            self.target_pos = STAND_JOINT_POS.copy()
-            return None, None
-
-        elif self.fsm_state == 'RL_MIX':
-            # ONNX 策略控制
-            obs = self._get_observation()
-
-            input_name = self.session.get_inputs()[0].name
-            output_name = self.session.get_outputs()[0].name
-            actions = self.session.run([output_name], {input_name: obs.reshape(1, -1)})[0][0]
-
-            # 调试：打印 ONNX 输出
-            print(f"[DEBUG] ONNX actions (Isaac): [{actions.min():.3f}, {actions.max():.3f}]  "
-                  f"obs[:3]={obs[0:3].round(3)} obs[24:27]={obs[24:27].round(3)}")
-
-            # 转换到 MuJoCo 顺序，更新目标位置
-            # Isaac Lab XGB action scale = 0.25（rough_env_cfg.py 第 32 行）
-            actions_mj = actions[ISAAC_TO_MUJOCO]
-            self.target_pos = STAND_JOINT_POS + actions_mj * 0.25
-
-            self.last_actions = actions.copy()
-
-            return obs, actions
-
-        return None, None
+        # 不裁剪 ONNX 输出 (Isaac Lab 训练时不裁剪)
+        actions_mj = actions[ISAAC_TO_MUJOCO]
+        self.target_pos = STAND_JOINT_POS + actions_mj * ACTION_SCALE
+        self.last_actions = actions.copy()
+        return obs, actions
 
     def run(self):
-        """运行仿真循环 (FSM: PASSIVE -> STANDUP -> RL_MIX)"""
+        """运行仿真循环 (FSM: PASSIVE -> STANDUP -> BALANCE <-> RL_MIX)"""
         print("\n[INFO] 启动 MuJoCo 仿真")
         print("      FSM 状态: PASSIVE (趴着)")
         print("\n[控制说明]")
@@ -440,7 +365,6 @@ class XgbPolicyRunner:
                     try:
                         c = key.char
                         if c == 'u': self.key_standup = True
-                        elif c == ' ': self.key_liedown = True
                         elif c == 'w': self.key_w = True
                         elif c == 's': self.key_s = True
                         elif c == 'a': self.key_a = True
@@ -448,8 +372,7 @@ class XgbPolicyRunner:
                         elif c == 'q': self.key_q = True
                         elif c == 'e': self.key_e = True
                     except AttributeError:
-                        if key == pynput_keyboard.Key.space:
-                            self.key_liedown = True
+                        pass
 
                 def on_release(key):
                     try:
@@ -475,41 +398,32 @@ class XgbPolicyRunner:
             while viewer.is_running():
                 start_time = time.time()
 
-                # FSM 状态转换 + 策略更新
+                # FSM 状态转换
                 self._update_fsm()
 
                 if self.fsm_state == 'STANDUP':
                     self._interpolate_target()
-                elif self.fsm_state == 'BALANCE':
-                    self.target_pos = STAND_JOINT_POS.copy()
-                elif self.fsm_state == 'RL_MIX':
-                    obs = self._get_observation()
-                    input_name = self.session.get_inputs()[0].name
-                    output_name = self.session.get_outputs()[0].name
-                    actions = self.session.run([output_name], {input_name: obs.reshape(1, -1)})[0][0]
-
-                    print(f"[DEBUG] ONNX (raw): [{actions.min():.3f}, {actions.max():.3f}]  "
-                          f"lin_vel={obs[0:3].round(3)} grav={obs[6:9].round(3)} "
-                          f"jpos_rel={obs[24:27].round(3)}")
-
-                    # 裁剪 ONNX 输出到 [-1, 1] (匹配训练时的动作范围)
-                    actions = np.clip(actions, -1.0, 1.0)
-                    print(f"[DEBUG] ONNX (clipped): [{actions.min():.3f}, {actions.max():.3f}]")
-
-                    actions_mj = actions[ISAAC_TO_MUJOCO]
-                    self.target_pos = STAND_JOINT_POS + actions_mj * 0.25
-                    self.last_actions = actions.copy()
+                elif self.fsm_state in ('BALANCE', 'RL_MIX'):
+                    # BALANCE 和 RL_MIX 都跑 ONNX 策略
+                    # BALANCE 时速度命令=0（策略学过的零速站立）
+                    # RL_MIX 时速度命令由按键设置
+                    obs, actions = self._infer_policy()
+                    if step % 10 == 0:
+                        print(f"[DEBUG] ONNX: [{actions.min():.3f}, {actions.max():.3f}]  "
+                              f"cmd={VELOCITY_CMD.round(2)} "
+                              f"lin_vel={obs[0:3].round(3)} "
+                              f"ang_vel={obs[3:6].round(3)} "
+                              f"grav={obs[6:9].round(3)}")
 
                 # 物理子步循环
                 for _ in range(self.steps_per_control):
-                    self._compute_gravity_compensation()
                     if self.fsm_state == 'STANDUP':
                         kp = KP_STANDUP * self._standup_gain
                         kd = KD_STANDUP * self._standup_gain
                         self._apply_pd_control(kp, kd)
-                    elif self.fsm_state == 'BALANCE':
-                        self._apply_pd_control(KP_BALANCE, KD_BALANCE)
                     else:
+                        # BALANCE 和 RL_MIX 统一使用 RL 增益 (KP=20, KD=0.7)
+                        # ONNX 策略输出已经包含平衡所需的动作
                         self._apply_pd_control()
                     mujoco.mj_step(self.model, self.data)
 
@@ -522,6 +436,7 @@ class XgbPolicyRunner:
                     base_pos = self.data.qpos[0:3]
                     quat = self.data.qpos[3:7]
                     print(f"[Step {step}] FSM={self.fsm_state} "
+                          f"cmd={VELOCITY_CMD.round(2)} "
                           f"pos=({base_pos[0]:.2f}, {base_pos[1]:.2f}, {base_pos[2]:.2f}) "
                           f"quat=({quat[0]:.3f},{quat[1]:.3f},{quat[2]:.3f},{quat[3]:.3f})")
 
