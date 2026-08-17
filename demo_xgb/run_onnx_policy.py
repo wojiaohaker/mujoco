@@ -8,7 +8,7 @@ XGB 四足机器人 ONNX 策略推理 + MuJoCo 仿真
     python run_onnx_policy.py [onnx_path]
 
 默认 ONNX 路径:
-    ~/Softwares/IsaacLab/logs/rsl_rl/xgb_flat/2026-08-11_17-02-19/exported/policy.onnx
+    ~/Softwares/IsaacLab/logs/rsl_rl/xgb_flat/2026-08-17_15-45-34/exported/policy.onnx
 """
 
 import numpy as np
@@ -24,7 +24,7 @@ import threading
 
 # ONNX 模型路径
 DEFAULT_ONNX_PATH = os.path.expanduser(
-    "~/Softwares/IsaacLab/logs/rsl_rl/xgb_flat/2026-08-12_09-55-03/exported/policy.onnx"
+    "~/Softwares/xgbrl/logs/rsl_rl/xgb_flat/2026-08-17_15-45-34/exported/policy.onnx"
 )
 
 # MuJoCo 模型路径
@@ -111,6 +111,11 @@ class XgbPolicyRunner:
         self.last_actions = np.zeros(12)
         self.control_time = 0.0
 
+        # LSTM 隐藏状态 (512维，匹配训练配置)
+        self.lstm_h = np.zeros((1, 1, 512), dtype=np.float32)  # h_in
+        self.lstm_c = np.zeros((1, 1, 512), dtype=np.float32)  # c_in
+        self._has_lstm = len(self.session.get_inputs()) > 1  # 检测是否为 LSTM 模型
+
         # FSM 状态: 'PASSIVE' -> 'STANDUP' -> 'BALANCE' <-> 'RL_MIX'
         self.fsm_state = 'PASSIVE'
         self.standup_start_time = None
@@ -153,16 +158,16 @@ class XgbPolicyRunner:
 
     def _get_observation(self) -> np.ndarray:
         """
-        构造 48 维观测 (Isaac Lab 格式)
+        构造 48 维观测 (Matrix 格式)
 
-        观测结构:
-        - base_lin_vel: 3      (基座线速度, 本体坐标系)
-        - base_ang_vel: 3      (基座角速度, 本体坐标系)
+        观测结构 (与 Matrix robot_mc 一致):
         - projected_gravity: 3 (重力投影, 本体坐标系)
+        - base_ang_vel: 3    (基座角速度, 本体坐标系)
+        - base_lin_vel: 3    (基座线速度, 本体坐标系; 部署时用 odom 估计)
         - velocity_commands: 3 (速度命令)
-        - joint_pos: 12        (关节位置, Isaac Lab 顺序)
-        - joint_vel: 12        (关节速度, Isaac Lab 顺序)
-        - last_actions: 12     (上一步动作, Isaac Lab 顺序)
+        - joint_pos: 12      (关节相对位置, Isaac Lab 顺序)
+        - joint_vel: 12      (关节速度, Isaac Lab 顺序)
+        - last_actions: 12   (上一步动作, Isaac Lab 顺序)
         """
         # 基座四元数 (w, x, y, z) - 从 qpos 直接读取
         quat = self.data.qpos[3:7].copy()  # w, x, y, z
@@ -193,11 +198,11 @@ class XgbPolicyRunner:
         joint_vel_isaac = joint_vel_mj[MUJOCO_TO_ISAAC]
         # joint_vel_rel = joint_vel - 0 = joint_vel (默认速度为0)
 
-        # 构造观测
+        # 构造观测 (Matrix 顺序: grav → ang_vel → lin_vel → cmd → pos → vel → action)
         obs = np.concatenate([
-            base_lin_vel,       # 3
-            base_ang_vel,       # 3
             projected_gravity,  # 3
+            base_ang_vel,       # 3
+            base_lin_vel,       # 3
             VELOCITY_CMD,       # 3
             joint_pos_rel,      # 12 (相对偏差)
             joint_vel_isaac,    # 12
@@ -305,13 +310,30 @@ class XgbPolicyRunner:
         self._standup_gain = gain_progress
 
     def _infer_policy(self):
-        """以 Isaac Lab 的观测和关节顺序运行一次策略。"""
+        """以 Matrix 格式的观测和关节顺序运行一次策略（支持 LSTM）。"""
         obs = self._get_observation()
-        input_name = self.session.get_inputs()[0].name
-        output_name = self.session.get_outputs()[0].name
-        actions = self.session.run(
-            [output_name], {input_name: obs.reshape(1, -1)}
-        )[0][0]
+
+        if self._has_lstm:
+            # LSTM 模型: obs + h_in + c_in → actions + h_out + c_out
+            input_names = [inp.name for inp in self.session.get_inputs()]
+            output_names = [out.name for out in self.session.get_outputs()]
+            feed = {
+                input_names[0]: obs.reshape(1, -1),   # obs [1, 48]
+                input_names[1]: self.lstm_h,           # h_in [1, 1, 512]
+                input_names[2]: self.lstm_c,           # c_in [1, 1, 512]
+            }
+            results = self.session.run(output_names, feed)
+            actions = results[0][0]                    # actions [12]
+            self.lstm_h = results[1]                   # h_out → 下一步的 h_in
+            self.lstm_c = results[2]                   # c_out → 下一步的 c_in
+        else:
+            # 简单 MLP 模型 (无 LSTM)
+            input_name = self.session.get_inputs()[0].name
+            output_name = self.session.get_outputs()[0].name
+            actions = self.session.run(
+                [output_name], {input_name: obs.reshape(1, -1)}
+            )[0][0]
+
         if not np.all(np.isfinite(actions)):
             raise RuntimeError(f"ONNX 输出包含非有限值: {actions}")
 
@@ -454,9 +476,9 @@ class XgbPolicyRunner:
                     if step % 10 == 0:
                         print(f"[DEBUG] ONNX: [{actions.min():.3f}, {actions.max():.3f}]  "
                               f"cmd={VELOCITY_CMD.round(2)} "
-                              f"lin_vel={obs[0:3].round(3)} "
+                              f"grav={obs[0:3].round(3)} "
                               f"ang_vel={obs[3:6].round(3)} "
-                              f"grav={obs[6:9].round(3)}")
+                              f"lin_vel={obs[6:9].round(3)}")
 
                 # 物理子步循环
                 for _ in range(self.steps_per_control):
