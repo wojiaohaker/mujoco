@@ -24,7 +24,8 @@ import threading
 
 # ONNX 模型路径
 DEFAULT_ONNX_PATH = os.path.expanduser(
-    "~/Softwares/xgbrl/logs/rsl_rl/xgb_flat/2026-08-17_15-45-34/exported/policy.onnx"
+    #"~/Softwares/xgbrl/logs/rsl_rl/xgb_flat/2026-08-17_15-45-34/exported/policy.onnx"
+    "~/Softwares/qiyuan_mc/models/policy.onnx"
 )
 
 # MuJoCo 模型路径
