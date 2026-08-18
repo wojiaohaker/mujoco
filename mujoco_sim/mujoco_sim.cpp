@@ -568,30 +568,30 @@ void MujocoSim::CarlaSdkBridgeThreadFunc() {
             if (ecal_pub_) {
                 ecal_pub_->Send(cached_state);
                 publish_count_++;
-                // 每次发送都输出 protobuf 序列化大小
-                size_t state_bytes = cached_state.ByteSizeLong();
-                std::cout << "[eCAL TX] RobotState #" << publish_count_
-                          << ": " << state_bytes << " bytes"
-                          << " | q_abad=" << cached_state.q_abad_size()
-                          << " q_hip=" << cached_state.q_hip_size()
-                          << " q_knee=" << cached_state.q_knee_size()
-                          << " q_foot=" << cached_state.q_foot_size()
-                          << " qd_abad=" << cached_state.qd_abad_size()
-                          << " qd_hip=" << cached_state.qd_hip_size()
-                          << " qd_knee=" << cached_state.qd_knee_size()
-                          << " qd_foot=" << cached_state.qd_foot_size()
-                          << " tau_abad_fb=" << cached_state.tau_abad_fb_size()
-                          << " tau_hip_fb=" << cached_state.tau_hip_fb_size()
-                          << " tau_knee_fb=" << cached_state.tau_knee_fb_size()
-                          << " tau_foot_fb=" << cached_state.tau_foot_fb_size()
-                          << " position=" << cached_state.position_size()
-                          << " quat=" << cached_state.quat_size()
-                          << " gyro=" << cached_state.gyro_size()
-                          << " acc=" << cached_state.acc_size()
-                          << " rpy=" << cached_state.rpy_size()
-                          << " v_world=" << cached_state.v_world_size()
-                          << " ts=" << cached_state.time_stamp()
-                          << std::endl;
+                // 每次发送都输出 protobuf 序列化大小 (高频日志，暂时注释)
+                // size_t state_bytes = cached_state.ByteSizeLong();
+                // std::cout << "[eCAL TX] RobotState #" << publish_count_
+                //           << ": " << state_bytes << " bytes"
+                //           << " | q_abad=" << cached_state.q_abad_size()
+                //           << " q_hip=" << cached_state.q_hip_size()
+                //           << " q_knee=" << cached_state.q_knee_size()
+                //           << " q_foot=" << cached_state.q_foot_size()
+                //           << " qd_abad=" << cached_state.qd_abad_size()
+                //           << " qd_hip=" << cached_state.qd_hip_size()
+                //           << " qd_knee=" << cached_state.qd_knee_size()
+                //           << " qd_foot=" << cached_state.qd_foot_size()
+                //           << " tau_abad_fb=" << cached_state.tau_abad_fb_size()
+                //           << " tau_hip_fb=" << cached_state.tau_hip_fb_size()
+                //           << " tau_knee_fb=" << cached_state.tau_knee_fb_size()
+                //           << " tau_foot_fb=" << cached_state.tau_foot_fb_size()
+                //           << " position=" << cached_state.position_size()
+                //           << " quat=" << cached_state.quat_size()
+                //           << " gyro=" << cached_state.gyro_size()
+                //           << " acc=" << cached_state.acc_size()
+                //           << " rpy=" << cached_state.rpy_size()
+                //           << " v_world=" << cached_state.v_world_size()
+                //           << " ts=" << cached_state.time_stamp()
+                //           << std::endl;
             }
         }
 
@@ -1023,35 +1023,35 @@ void MujocoSim::OnRobotCmdReceived(const char* topic_name,
     latest_cmd_ = msg;
     has_cmd_ = true;
 
-    // 每次收到命令都输出 protobuf 反序列化大小和字段信息
+    // 每次收到命令都输出 protobuf 反序列化大小和字段信息 (高频日志，暂时注释)
     static uint64_t cmd_count = 0;
     cmd_count++;
-    {
-        size_t cmd_bytes = msg.ByteSizeLong();
-        std::cout << "[eCAL RX] RobotCmd #" << cmd_count
-                  << ": " << cmd_bytes << " bytes"
-                  << " | q_des_abad=" << msg.q_des_abad_size()
-                  << " q_des_hip=" << msg.q_des_hip_size()
-                  << " q_des_knee=" << msg.q_des_knee_size()
-                  << " q_des_foot=" << msg.q_des_foot_size()
-                  << " qd_des_abad=" << msg.qd_des_abad_size()
-                  << " qd_des_hip=" << msg.qd_des_hip_size()
-                  << " qd_des_knee=" << msg.qd_des_knee_size()
-                  << " qd_des_foot=" << msg.qd_des_foot_size()
-                  << " kp_abad=" << msg.kp_abad_size()
-                  << " kp_hip=" << msg.kp_hip_size()
-                  << " kp_knee=" << msg.kp_knee_size()
-                  << " kp_foot=" << msg.kp_foot_size()
-                  << " kd_abad=" << msg.kd_abad_size()
-                  << " kd_hip=" << msg.kd_hip_size()
-                  << " kd_knee=" << msg.kd_knee_size()
-                  << " kd_foot=" << msg.kd_foot_size()
-                  << " tau_abad_ff=" << msg.tau_abad_ff_size()
-                  << " tau_hip_ff=" << msg.tau_hip_ff_size()
-                  << " tau_knee_ff=" << msg.tau_knee_ff_size()
-                  << " tau_foot_ff=" << msg.tau_foot_ff_size()
-                  << std::endl;
-    }
+    // {
+    //     size_t cmd_bytes = msg.ByteSizeLong();
+    //     std::cout << "[eCAL RX] RobotCmd #" << cmd_count
+    //               << ": " << cmd_bytes << " bytes"
+    //               << " | q_des_abad=" << msg.q_des_abad_size()
+    //               << " q_des_hip=" << msg.q_des_hip_size()
+    //               << " q_des_knee=" << msg.q_des_knee_size()
+    //               << " q_des_foot=" << msg.q_des_foot_size()
+    //               << " qd_des_abad=" << msg.qd_des_abad_size()
+    //               << " qd_des_hip=" << msg.qd_des_hip_size()
+    //               << " qd_des_knee=" << msg.qd_des_knee_size()
+    //               << " qd_des_foot=" << msg.qd_des_foot_size()
+    //               << " kp_abad=" << msg.kp_abad_size()
+    //               << " kp_hip=" << msg.kp_hip_size()
+    //               << " kp_knee=" << msg.kp_knee_size()
+    //               << " kp_foot=" << msg.kp_foot_size()
+    //               << " kd_abad=" << msg.kd_abad_size()
+    //               << " kd_hip=" << msg.kd_hip_size()
+    //               << " kd_knee=" << msg.kd_knee_size()
+    //               << " kd_foot=" << msg.kd_foot_size()
+    //               << " tau_abad_ff=" << msg.tau_abad_ff_size()
+    //               << " tau_hip_ff=" << msg.tau_hip_ff_size()
+    //               << " tau_knee_ff=" << msg.tau_knee_ff_size()
+    //               << " tau_foot_ff=" << msg.tau_foot_ff_size()
+    //               << std::endl;
+    // }
     if (cmd_count % 500 == 1) {
         std::cout << "[eCAL] RobotCmd #" << cmd_count
                   << ": q_des_abad[0]=" << (msg.q_des_abad_size() > 0 ? msg.q_des_abad(0) : -999)
