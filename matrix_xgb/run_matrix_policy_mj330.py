@@ -2,9 +2,9 @@
 """
 matrix_xgb (MuJoCo 3.3.0 源码构建版): Matrix policy_mix_walk.onnx + MuJoCo 快速调试台
 
-与 run_matrix_policy.py 逻辑完全相同, 唯一区别: 使用 Mujoco330 源码树
+与 run_matrix_policy.py 逻辑完全相同, 唯一区别: 强制使用 Mujoco330 源码树
 自行编译的 Python 绑定 (~/Softwares/Mujoco330/mj330_py, 版本 3.3.0,
-与 Matrix robot_mujoco 桥链接的版本一致), 而非 env_isaaclab 里的 pip 3.8.0。
+与 Matrix robot_mujoco 桥链接的版本一致), 而非 env_isaaclab 里的 pip 版。
 
 运行方式 (用系统 python3.10, 无需激活任何环境):
     python3 run_matrix_policy_mj330.py [onnx_path]
@@ -28,15 +28,15 @@ matrix_xgb (MuJoCo 3.3.0 源码构建版): Matrix policy_mix_walk.onnx + MuJoCo 
         完成后直接进 RL
 
 用法:
-    python3 run_matrix_policy.py [onnx_path]
-    python3 run_matrix_policy.py --no-clip      # 关闭动作裁剪
-    python3 run_matrix_policy.py --d7 0.0401    # d6-8 填 (0,0.0401,0)
+    python3 run_matrix_policy_mj330.py [onnx_path]
+    python3 run_matrix_policy_mj330.py --no-clip      # 关闭动作裁剪
+    python3 run_matrix_policy_mj330.py --d7 0.0401    # d6-8 填 (0,0.0401,0)
 """
 
 import os
 import sys
 
-# 优先使用 Mujoco330 源码树自行编译的 Python 绑定 (3.3.0)
+# 强制使用 Mujoco330 源码树自行编译的 Python 绑定 (3.3.0)
 _MJ330_PY = os.path.expanduser('~/Softwares/Mujoco330/mj330_py')
 if _MJ330_PY not in sys.path:
     sys.path.insert(0, _MJ330_PY)
@@ -109,6 +109,8 @@ class MatrixPolicyRunner:
     def __init__(self, onnx_path: str, clip_action: bool, d7_const: float):
         self.clip_action = clip_action
         self.d7_const = d7_const
+
+        print(f"[INFO] 使用 MuJoCo {mujoco.__version__} (源码构建版): {mujoco.__file__}")
 
         print(f"[INFO] 加载 Matrix 策略: {onnx_path}")
         self.session = ort.InferenceSession(
@@ -389,7 +391,7 @@ class MatrixPolicyRunner:
 
 
 def main():
-    parser = argparse.ArgumentParser(description="matrix_xgb 快速调试台")
+    parser = argparse.ArgumentParser(description="matrix_xgb 快速调试台 (MuJoCo 3.3.0 源码构建版)")
     parser.add_argument('onnx_path', nargs='?', default=DEFAULT_ONNX_PATH,
                         help='policy_mix_walk.onnx 路径')
     parser.add_argument('--no-clip', action='store_true',
