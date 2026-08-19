@@ -1,0 +1,324 @@
+running bdist_wheel
+running build
+running build_ext
+CMake Warning (dev) at CMakeLists.txt:15 (project):
+  cmake_minimum_required() should be called prior to this top-level project()
+  call.  Please see the cmake-commands(7) manual for usage documentation of
+  both commands.
+This warning is for project developers.  Use -Wno-dev to suppress it.
+
+CMake Warning (dev) at CMakeLists.txt:15 (project):
+  Policy CMP0048 is not set: project() command manages VERSION variables.
+  Run "cmake --help-policy CMP0048" for policy details.  Use the cmake_policy
+  command to set the policy and suppress this warning.
+
+  The following variable(s) would be set to empty:
+
+    CMAKE_PROJECT_VERSION
+    CMAKE_PROJECT_VERSION_MAJOR
+This warning is for project developers.  Use -Wno-dev to suppress it.
+
+MuJoCo is at /home/qiyuan/Softwares/Mujoco330/install/lib/libmujoco.so
+MuJoCo headers are at /home/qiyuan/Softwares/Mujoco330/install/include
+-- mujoco::FindOrFetch: checking for targets in package `absl`
+-- mujoco::FindOrFetch: checking for targets in package `absl` - target `absl::core_headers` not defined.
+-- mujoco::FindOrFetch: Using FetchContent to retrieve `abseil-cpp`
+-- mujoco::FindOrFetch: Using FetchContent to retrieve `abseil-cpp` - Done
+-- mujoco::FindOrFetch: checking for targets in package `Eigen3`
+-- mujoco::FindOrFetch: checking for targets in package `Eigen3` - target `Eigen3::Eigen` not defined.
+-- mujoco::FindOrFetch: Using FetchContent to retrieve `eigen`
+-- 
+-- Configured Eigen 3.4.90
+-- 
+-- mujoco::FindOrFetch: Using FetchContent to retrieve `eigen` - Done
+-- mujoco::FindOrFetch: checking for targets in package `pybind11`
+-- mujoco::FindOrFetch: checking for targets in package `pybind11` - target `pybind11::pybind11_headers` not defined.
+-- mujoco::FindOrFetch: Using FetchContent to retrieve `pybind11`
+-- pybind11 v2.13.6 
+-- mujoco::FindOrFetch: Using FetchContent to retrieve `pybind11` - Done
+-- mujoco::FindOrFetch: checking for targets in package `mujoco`
+-- mujoco::FindOrFetch: checking for targets in package `mujoco` - found
+-- mujoco::FindOrFetch: checking for targets in package `glfw3`
+-- mujoco::FindOrFetch: checking for targets in package `glfw3` - target `glfw` not defined.
+-- mujoco::FindOrFetch: Using FetchContent to retrieve `glfw3`
+-- Using X11 for window creation
+-- mujoco::FindOrFetch: Using FetchContent to retrieve `glfw3` - Done
+-- Configuring done (0.5s)
+-- Generating done (0.1s)
+-- Build files have been written to: /home/qiyuan/Softwares/Mujoco330/python/build/temp.linux-x86_64-3.10
+[  0%] Built target absl_exponential_biased
+[  1%] Built target absl_spinlock_wait
+[  1%] Built target absl_utf8_for_code_point
+[  3%] Built target absl_civil_time
+[  3%] Built target absl_log_severity
+[  5%] Built target lodepng
+[  5%] Built target absl_int128
+[  7%] Built target platform_ui_adapter
+[  8%] Built target _enums
+[ 10%] Built target _constants
+[ 10%] Built target _errors
+[ 12%] Built target absl_decode_rust_punycode
+[ 17%] Built target absl_time_zone
+[ 19%] Built target absl_raw_logging_internal
+[ 19%] Built target libsimulate
+[ 19%] Built target absl_demangle_rust
+[ 21%] Built target absl_cordz_functions
+[ 22%] Built target absl_bad_variant_access
+[ 22%] Built target absl_bad_optional_access
+[ 24%] Built target absl_throw_delegate
+[ 26%] Built target absl_debugging_internal
+[ 29%] Built target absl_base
+[ 31%] Built target absl_demangle_internal
+[ 33%] Built target absl_stacktrace
+[ 35%] Built target absl_tracing_internal
+[ 36%] Built target absl_crc_cpu_detect
+[ 38%] Built target absl_malloc_internal
+[ 38%] Built target absl_string_view
+[ 40%] Built target absl_strings_internal
+[ 40%] Built target absl_low_level_hash
+[ 42%] Built target absl_city
+[ 43%] Built target absl_crc_internal
+[ 45%] Built target absl_graphcycles_internal
+[ 56%] Built target absl_strings
+[ 57%] Built target absl_symbolize
+[ 59%] Built target absl_hash
+[ 63%] Built target absl_time
+[ 66%] Built target absl_str_format_internal
+[ 68%] Built target absl_kernel_timeout_internal
+[ 70%] Built target absl_crc32c
+[ 71%] Built target absl_crc_cord_state
+[ 78%] Built target absl_synchronization
+[ 78%] Built target absl_cordz_handle
+[ 82%] Built target absl_cord_internal
+[ 84%] Built target absl_hashtablez_sampler
+[ 85%] Built target absl_cordz_info
+[ 89%] Built target absl_cord
+[ 91%] Built target absl_raw_hash_set
+[ 91%] Built target _simulate
+[ 92%] Built target _structs
+[ 92%] Built target _callbacks
+[ 94%] Built target _functions
+[ 98%] Built target _render
+[ 98%] Built target _specs
+[100%] Built target _rollout
+/usr/lib/python3/dist-packages/setuptools/command/install.py:34: SetuptoolsDeprecationWarning: setup.py install is deprecated. Use build and pip and other standards-based tools.
+  warnings.warn(
+Configuring CMake with the following arguments:
+    -DPython3_ROOT_DIR:PATH=/usr
+    -DPython3_EXECUTABLE:STRING=/usr/bin/python3
+    -DCMAKE_MODULE_PATH:PATH=/home/qiyuan/Softwares/Mujoco330/python/mujoco/cmake
+    -DCMAKE_BUILD_TYPE:STRING=Release
+    -DCMAKE_LIBRARY_OUTPUT_DIRECTORY:PATH=build/temp.linux-x86_64-3.10
+    -DCMAKE_INTERPROCEDURAL_OPTIMIZATION:BOOL=ON
+    -DCMAKE_Fortran_COMPILER:STRING=
+    -DBUILD_TESTING:BOOL=OFF
+    -DMUJOCO_LIBRARY_DIR:PATH=/home/qiyuan/Softwares/Mujoco330/install/lib
+    -DMUJOCO_INCLUDE_DIR:PATH=/home/qiyuan/Softwares/Mujoco330/install/include
+    -DPython3_LIBRARY=/usr/lib/python3.10
+    -DPython3_INCLUDE_DIR=/usr/include/python3.10
+Building all extensions with CMake
+installing to build/bdist.linux-x86_64/wheel
+running install
+running install_lib
+creating build/bdist.linux-x86_64
+creating build/bdist.linux-x86_64/wheel
+creating build/bdist.linux-x86_64/wheel/mujoco
+copying build/lib.linux-x86_64-3.10/mujoco/libmujoco.so.3.3.0 -> build/bdist.linux-x86_64/wheel/mujoco
+copying build/lib.linux-x86_64-3.10/mujoco/_render.cpython-310-x86_64-linux-gnu.so -> build/bdist.linux-x86_64/wheel/mujoco
+copying build/lib.linux-x86_64-3.10/mujoco/_structs.cpython-310-x86_64-linux-gnu.so -> build/bdist.linux-x86_64/wheel/mujoco
+creating build/bdist.linux-x86_64/wheel/mujoco/plugin
+copying build/lib.linux-x86_64-3.10/mujoco/plugin/libabsl_bad_variant_access.a -> build/bdist.linux-x86_64/wheel/mujoco/plugin
+copying build/lib.linux-x86_64-3.10/mujoco/plugin/libmujoco.so.3.3.0 -> build/bdist.linux-x86_64/wheel/mujoco/plugin
+copying build/lib.linux-x86_64-3.10/mujoco/plugin/libabsl_raw_hash_set.a -> build/bdist.linux-x86_64/wheel/mujoco/plugin
+copying build/lib.linux-x86_64-3.10/mujoco/plugin/libabsl_strings.a -> build/bdist.linux-x86_64/wheel/mujoco/plugin
+copying build/lib.linux-x86_64-3.10/mujoco/plugin/libabsl_synchronization.a -> build/bdist.linux-x86_64/wheel/mujoco/plugin
+copying build/lib.linux-x86_64-3.10/mujoco/plugin/libsimulate.a -> build/bdist.linux-x86_64/wheel/mujoco/plugin
+copying build/lib.linux-x86_64-3.10/mujoco/plugin/libabsl_bad_optional_access.a -> build/bdist.linux-x86_64/wheel/mujoco/plugin
+copying build/lib.linux-x86_64-3.10/mujoco/plugin/libabsl_kernel_timeout_internal.a -> build/bdist.linux-x86_64/wheel/mujoco/plugin
+copying build/lib.linux-x86_64-3.10/mujoco/plugin/libccd.a -> build/bdist.linux-x86_64/wheel/mujoco/plugin
+copying build/lib.linux-x86_64-3.10/mujoco/plugin/libmujoco.so -> build/bdist.linux-x86_64/wheel/mujoco/plugin
+copying build/lib.linux-x86_64-3.10/mujoco/plugin/libfixture.a -> build/bdist.linux-x86_64/wheel/mujoco/plugin
+copying build/lib.linux-x86_64-3.10/mujoco/plugin/libabsl_int128.a -> build/bdist.linux-x86_64/wheel/mujoco/plugin
+copying build/lib.linux-x86_64-3.10/mujoco/plugin/libabsl_civil_time.a -> build/bdist.linux-x86_64/wheel/mujoco/plugin
+copying build/lib.linux-x86_64-3.10/mujoco/plugin/libelasticity.so -> build/bdist.linux-x86_64/wheel/mujoco/plugin
+copying build/lib.linux-x86_64-3.10/mujoco/plugin/libabsl_str_format_internal.a -> build/bdist.linux-x86_64/wheel/mujoco/plugin
+copying build/lib.linux-x86_64-3.10/mujoco/plugin/libabsl_stacktrace.a -> build/bdist.linux-x86_64/wheel/mujoco/plugin
+copying build/lib.linux-x86_64-3.10/mujoco/plugin/libabsl_log_severity.a -> build/bdist.linux-x86_64/wheel/mujoco/plugin
+copying build/lib.linux-x86_64-3.10/mujoco/plugin/libabsl_low_level_hash.a -> build/bdist.linux-x86_64/wheel/mujoco/plugin
+copying build/lib.linux-x86_64-3.10/mujoco/plugin/libabsl_cord.a -> build/bdist.linux-x86_64/wheel/mujoco/plugin
+copying build/lib.linux-x86_64-3.10/mujoco/plugin/libabsl_string_view.a -> build/bdist.linux-x86_64/wheel/mujoco/plugin
+copying build/lib.linux-x86_64-3.10/mujoco/plugin/libtinyxml2.a -> build/bdist.linux-x86_64/wheel/mujoco/plugin
+copying build/lib.linux-x86_64-3.10/mujoco/plugin/libabsl_strings_internal.a -> build/bdist.linux-x86_64/wheel/mujoco/plugin
+copying build/lib.linux-x86_64-3.10/mujoco/plugin/libabsl_utf8_for_code_point.a -> build/bdist.linux-x86_64/wheel/mujoco/plugin
+copying build/lib.linux-x86_64-3.10/mujoco/plugin/libgtest_main.a -> build/bdist.linux-x86_64/wheel/mujoco/plugin
+copying build/lib.linux-x86_64-3.10/mujoco/plugin/libSdfLib.a -> build/bdist.linux-x86_64/wheel/mujoco/plugin
+copying build/lib.linux-x86_64-3.10/mujoco/plugin/libspdlog.a -> build/bdist.linux-x86_64/wheel/mujoco/plugin
+copying build/lib.linux-x86_64-3.10/mujoco/plugin/libabsl_cordz_info.a -> build/bdist.linux-x86_64/wheel/mujoco/plugin
+copying build/lib.linux-x86_64-3.10/mujoco/plugin/libabsl_malloc_internal.a -> build/bdist.linux-x86_64/wheel/mujoco/plugin
+copying build/lib.linux-x86_64-3.10/mujoco/plugin/libabsl_throw_delegate.a -> build/bdist.linux-x86_64/wheel/mujoco/plugin
+copying build/lib.linux-x86_64-3.10/mujoco/plugin/libgmock.a -> build/bdist.linux-x86_64/wheel/mujoco/plugin
+copying build/lib.linux-x86_64-3.10/mujoco/plugin/libabsl_hash.a -> build/bdist.linux-x86_64/wheel/mujoco/plugin
+copying build/lib.linux-x86_64-3.10/mujoco/plugin/libsensor.so -> build/bdist.linux-x86_64/wheel/mujoco/plugin
+copying build/lib.linux-x86_64-3.10/mujoco/plugin/libabsl_crc_cpu_detect.a -> build/bdist.linux-x86_64/wheel/mujoco/plugin
+copying build/lib.linux-x86_64-3.10/mujoco/plugin/libabsl_raw_logging_internal.a -> build/bdist.linux-x86_64/wheel/mujoco/plugin
+copying build/lib.linux-x86_64-3.10/mujoco/plugin/libabsl_exponential_biased.a -> build/bdist.linux-x86_64/wheel/mujoco/plugin
+copying build/lib.linux-x86_64-3.10/mujoco/plugin/libactuator.so -> build/bdist.linux-x86_64/wheel/mujoco/plugin
+copying build/lib.linux-x86_64-3.10/mujoco/plugin/libglfw3.a -> build/bdist.linux-x86_64/wheel/mujoco/plugin
+copying build/lib.linux-x86_64-3.10/mujoco/plugin/libabsl_base.a -> build/bdist.linux-x86_64/wheel/mujoco/plugin
+copying build/lib.linux-x86_64-3.10/mujoco/plugin/libabsl_graphcycles_internal.a -> build/bdist.linux-x86_64/wheel/mujoco/plugin
+copying build/lib.linux-x86_64-3.10/mujoco/plugin/libabsl_demangle_rust.a -> build/bdist.linux-x86_64/wheel/mujoco/plugin
+copying build/lib.linux-x86_64-3.10/mujoco/plugin/libabsl_cordz_handle.a -> build/bdist.linux-x86_64/wheel/mujoco/plugin
+copying build/lib.linux-x86_64-3.10/mujoco/plugin/libsdf.so -> build/bdist.linux-x86_64/wheel/mujoco/plugin
+copying build/lib.linux-x86_64-3.10/mujoco/plugin/libabsl_demangle_internal.a -> build/bdist.linux-x86_64/wheel/mujoco/plugin
+copying build/lib.linux-x86_64-3.10/mujoco/plugin/libabsl_tracing_internal.a -> build/bdist.linux-x86_64/wheel/mujoco/plugin
+copying build/lib.linux-x86_64-3.10/mujoco/plugin/libqhullstatic_r.a -> build/bdist.linux-x86_64/wheel/mujoco/plugin
+copying build/lib.linux-x86_64-3.10/mujoco/plugin/libbenchmark_main.a -> build/bdist.linux-x86_64/wheel/mujoco/plugin
+copying build/lib.linux-x86_64-3.10/mujoco/plugin/libabsl_crc32c.a -> build/bdist.linux-x86_64/wheel/mujoco/plugin
+copying build/lib.linux-x86_64-3.10/mujoco/plugin/libabsl_time.a -> build/bdist.linux-x86_64/wheel/mujoco/plugin
+copying build/lib.linux-x86_64-3.10/mujoco/plugin/libabsl_symbolize.a -> build/bdist.linux-x86_64/wheel/mujoco/plugin
+copying build/lib.linux-x86_64-3.10/mujoco/plugin/libgtest.a -> build/bdist.linux-x86_64/wheel/mujoco/plugin
+copying build/lib.linux-x86_64-3.10/mujoco/plugin/libabsl_decode_rust_punycode.a -> build/bdist.linux-x86_64/wheel/mujoco/plugin
+copying build/lib.linux-x86_64-3.10/mujoco/plugin/libtinyobjloader.a -> build/bdist.linux-x86_64/wheel/mujoco/plugin
+copying build/lib.linux-x86_64-3.10/mujoco/plugin/libabsl_time_zone.a -> build/bdist.linux-x86_64/wheel/mujoco/plugin
+copying build/lib.linux-x86_64-3.10/mujoco/plugin/libabsl_cordz_functions.a -> build/bdist.linux-x86_64/wheel/mujoco/plugin
+copying build/lib.linux-x86_64-3.10/mujoco/plugin/libabsl_cord_internal.a -> build/bdist.linux-x86_64/wheel/mujoco/plugin
+copying build/lib.linux-x86_64-3.10/mujoco/plugin/libabsl_city.a -> build/bdist.linux-x86_64/wheel/mujoco/plugin
+copying build/lib.linux-x86_64-3.10/mujoco/plugin/libabsl_debugging_internal.a -> build/bdist.linux-x86_64/wheel/mujoco/plugin
+copying build/lib.linux-x86_64-3.10/mujoco/plugin/libabsl_crc_cord_state.a -> build/bdist.linux-x86_64/wheel/mujoco/plugin
+copying build/lib.linux-x86_64-3.10/mujoco/plugin/libabsl_hashtablez_sampler.a -> build/bdist.linux-x86_64/wheel/mujoco/plugin
+copying build/lib.linux-x86_64-3.10/mujoco/plugin/liblodepng.a -> build/bdist.linux-x86_64/wheel/mujoco/plugin
+copying build/lib.linux-x86_64-3.10/mujoco/plugin/libbenchmark.a -> build/bdist.linux-x86_64/wheel/mujoco/plugin
+copying build/lib.linux-x86_64-3.10/mujoco/plugin/libabsl_crc_internal.a -> build/bdist.linux-x86_64/wheel/mujoco/plugin
+copying build/lib.linux-x86_64-3.10/mujoco/plugin/libabsl_spinlock_wait.a -> build/bdist.linux-x86_64/wheel/mujoco/plugin
+copying build/lib.linux-x86_64-3.10/mujoco/_simulate.cpython-310-x86_64-linux-gnu.so -> build/bdist.linux-x86_64/wheel/mujoco
+copying build/lib.linux-x86_64-3.10/mujoco/_functions.cpython-310-x86_64-linux-gnu.so -> build/bdist.linux-x86_64/wheel/mujoco
+copying build/lib.linux-x86_64-3.10/mujoco/_enums.cpython-310-x86_64-linux-gnu.so -> build/bdist.linux-x86_64/wheel/mujoco
+copying build/lib.linux-x86_64-3.10/mujoco/_rollout.cpython-310-x86_64-linux-gnu.so -> build/bdist.linux-x86_64/wheel/mujoco
+copying build/lib.linux-x86_64-3.10/mujoco/_specs.cpython-310-x86_64-linux-gnu.so -> build/bdist.linux-x86_64/wheel/mujoco
+copying build/lib.linux-x86_64-3.10/mujoco/_callbacks.cpython-310-x86_64-linux-gnu.so -> build/bdist.linux-x86_64/wheel/mujoco
+copying build/lib.linux-x86_64-3.10/mujoco/_constants.cpython-310-x86_64-linux-gnu.so -> build/bdist.linux-x86_64/wheel/mujoco
+copying build/lib.linux-x86_64-3.10/mujoco/_errors.cpython-310-x86_64-linux-gnu.so -> build/bdist.linux-x86_64/wheel/mujoco
+creating build/bdist.linux-x86_64/wheel/mujoco/include
+creating build/bdist.linux-x86_64/wheel/mujoco/include/mujoco
+copying build/lib.linux-x86_64-3.10/mujoco/include/mujoco/mjspec.h -> build/bdist.linux-x86_64/wheel/mujoco/include/mujoco
+copying build/lib.linux-x86_64-3.10/mujoco/include/mujoco/mjplugin.h -> build/bdist.linux-x86_64/wheel/mujoco/include/mujoco
+copying build/lib.linux-x86_64-3.10/mujoco/include/mujoco/mjxmacro.h -> build/bdist.linux-x86_64/wheel/mujoco/include/mujoco
+copying build/lib.linux-x86_64-3.10/mujoco/include/mujoco/mjmacro.h -> build/bdist.linux-x86_64/wheel/mujoco/include/mujoco
+copying build/lib.linux-x86_64-3.10/mujoco/include/mujoco/mjsan.h -> build/bdist.linux-x86_64/wheel/mujoco/include/mujoco
+copying build/lib.linux-x86_64-3.10/mujoco/include/mujoco/mjvisualize.h -> build/bdist.linux-x86_64/wheel/mujoco/include/mujoco
+copying build/lib.linux-x86_64-3.10/mujoco/include/mujoco/mjui.h -> build/bdist.linux-x86_64/wheel/mujoco/include/mujoco
+copying build/lib.linux-x86_64-3.10/mujoco/include/mujoco/mjdata.h -> build/bdist.linux-x86_64/wheel/mujoco/include/mujoco
+copying build/lib.linux-x86_64-3.10/mujoco/include/mujoco/mjrender.h -> build/bdist.linux-x86_64/wheel/mujoco/include/mujoco
+copying build/lib.linux-x86_64-3.10/mujoco/include/mujoco/mjmodel.h -> build/bdist.linux-x86_64/wheel/mujoco/include/mujoco
+copying build/lib.linux-x86_64-3.10/mujoco/include/mujoco/mjthread.h -> build/bdist.linux-x86_64/wheel/mujoco/include/mujoco
+copying build/lib.linux-x86_64-3.10/mujoco/include/mujoco/mjtnum.h -> build/bdist.linux-x86_64/wheel/mujoco/include/mujoco
+copying build/lib.linux-x86_64-3.10/mujoco/include/mujoco/mujoco.h -> build/bdist.linux-x86_64/wheel/mujoco/include/mujoco
+copying build/lib.linux-x86_64-3.10/mujoco/include/mujoco/mjexport.h -> build/bdist.linux-x86_64/wheel/mujoco/include/mujoco
+running install_egg_info
+running egg_info
+creating UNKNOWN.egg-info
+writing UNKNOWN.egg-info/PKG-INFO
+writing dependency_links to UNKNOWN.egg-info/dependency_links.txt
+writing top-level names to UNKNOWN.egg-info/top_level.txt
+writing manifest file 'UNKNOWN.egg-info/SOURCES.txt'
+reading manifest file 'UNKNOWN.egg-info/SOURCES.txt'
+reading manifest template 'MANIFEST.in'
+warning: no files found matching 'LICENSE'
+writing manifest file 'UNKNOWN.egg-info/SOURCES.txt'
+Copying UNKNOWN.egg-info to build/bdist.linux-x86_64/wheel/UNKNOWN-0.0.0.egg-info
+running install_scripts
+creating build/bdist.linux-x86_64/wheel/UNKNOWN-0.0.0.dist-info/WHEEL
+creating 'dist/UNKNOWN-0.0.0-cp310-cp310-linux_x86_64.whl' and adding 'build/bdist.linux-x86_64/wheel' to it
+adding 'mujoco/_callbacks.cpython-310-x86_64-linux-gnu.so'
+adding 'mujoco/_constants.cpython-310-x86_64-linux-gnu.so'
+adding 'mujoco/_enums.cpython-310-x86_64-linux-gnu.so'
+adding 'mujoco/_errors.cpython-310-x86_64-linux-gnu.so'
+adding 'mujoco/_functions.cpython-310-x86_64-linux-gnu.so'
+adding 'mujoco/_render.cpython-310-x86_64-linux-gnu.so'
+adding 'mujoco/_rollout.cpython-310-x86_64-linux-gnu.so'
+adding 'mujoco/_simulate.cpython-310-x86_64-linux-gnu.so'
+adding 'mujoco/_specs.cpython-310-x86_64-linux-gnu.so'
+adding 'mujoco/_structs.cpython-310-x86_64-linux-gnu.so'
+adding 'mujoco/libmujoco.so.3.3.0'
+adding 'mujoco/include/mujoco/mjdata.h'
+adding 'mujoco/include/mujoco/mjexport.h'
+adding 'mujoco/include/mujoco/mjmacro.h'
+adding 'mujoco/include/mujoco/mjmodel.h'
+adding 'mujoco/include/mujoco/mjplugin.h'
+adding 'mujoco/include/mujoco/mjrender.h'
+adding 'mujoco/include/mujoco/mjsan.h'
+adding 'mujoco/include/mujoco/mjspec.h'
+adding 'mujoco/include/mujoco/mjthread.h'
+adding 'mujoco/include/mujoco/mjtnum.h'
+adding 'mujoco/include/mujoco/mjui.h'
+adding 'mujoco/include/mujoco/mjvisualize.h'
+adding 'mujoco/include/mujoco/mjxmacro.h'
+adding 'mujoco/include/mujoco/mujoco.h'
+adding 'mujoco/plugin/libSdfLib.a'
+adding 'mujoco/plugin/libabsl_bad_optional_access.a'
+adding 'mujoco/plugin/libabsl_bad_variant_access.a'
+adding 'mujoco/plugin/libabsl_base.a'
+adding 'mujoco/plugin/libabsl_city.a'
+adding 'mujoco/plugin/libabsl_civil_time.a'
+adding 'mujoco/plugin/libabsl_cord.a'
+adding 'mujoco/plugin/libabsl_cord_internal.a'
+adding 'mujoco/plugin/libabsl_cordz_functions.a'
+adding 'mujoco/plugin/libabsl_cordz_handle.a'
+adding 'mujoco/plugin/libabsl_cordz_info.a'
+adding 'mujoco/plugin/libabsl_crc32c.a'
+adding 'mujoco/plugin/libabsl_crc_cord_state.a'
+adding 'mujoco/plugin/libabsl_crc_cpu_detect.a'
+adding 'mujoco/plugin/libabsl_crc_internal.a'
+adding 'mujoco/plugin/libabsl_debugging_internal.a'
+adding 'mujoco/plugin/libabsl_decode_rust_punycode.a'
+adding 'mujoco/plugin/libabsl_demangle_internal.a'
+adding 'mujoco/plugin/libabsl_demangle_rust.a'
+adding 'mujoco/plugin/libabsl_exponential_biased.a'
+adding 'mujoco/plugin/libabsl_graphcycles_internal.a'
+adding 'mujoco/plugin/libabsl_hash.a'
+adding 'mujoco/plugin/libabsl_hashtablez_sampler.a'
+adding 'mujoco/plugin/libabsl_int128.a'
+adding 'mujoco/plugin/libabsl_kernel_timeout_internal.a'
+adding 'mujoco/plugin/libabsl_log_severity.a'
+adding 'mujoco/plugin/libabsl_low_level_hash.a'
+adding 'mujoco/plugin/libabsl_malloc_internal.a'
+adding 'mujoco/plugin/libabsl_raw_hash_set.a'
+adding 'mujoco/plugin/libabsl_raw_logging_internal.a'
+adding 'mujoco/plugin/libabsl_spinlock_wait.a'
+adding 'mujoco/plugin/libabsl_stacktrace.a'
+adding 'mujoco/plugin/libabsl_str_format_internal.a'
+adding 'mujoco/plugin/libabsl_string_view.a'
+adding 'mujoco/plugin/libabsl_strings.a'
+adding 'mujoco/plugin/libabsl_strings_internal.a'
+adding 'mujoco/plugin/libabsl_symbolize.a'
+adding 'mujoco/plugin/libabsl_synchronization.a'
+adding 'mujoco/plugin/libabsl_throw_delegate.a'
+adding 'mujoco/plugin/libabsl_time.a'
+adding 'mujoco/plugin/libabsl_time_zone.a'
+adding 'mujoco/plugin/libabsl_tracing_internal.a'
+adding 'mujoco/plugin/libabsl_utf8_for_code_point.a'
+adding 'mujoco/plugin/libactuator.so'
+adding 'mujoco/plugin/libbenchmark.a'
+adding 'mujoco/plugin/libbenchmark_main.a'
+adding 'mujoco/plugin/libccd.a'
+adding 'mujoco/plugin/libelasticity.so'
+adding 'mujoco/plugin/libfixture.a'
+adding 'mujoco/plugin/libglfw3.a'
+adding 'mujoco/plugin/libgmock.a'
+adding 'mujoco/plugin/libgtest.a'
+adding 'mujoco/plugin/libgtest_main.a'
+adding 'mujoco/plugin/liblodepng.a'
+adding 'mujoco/plugin/libmujoco.so'
+adding 'mujoco/plugin/libmujoco.so.3.3.0'
+adding 'mujoco/plugin/libqhullstatic_r.a'
+adding 'mujoco/plugin/libsdf.so'
+adding 'mujoco/plugin/libsensor.so'
+adding 'mujoco/plugin/libsimulate.a'
+adding 'mujoco/plugin/libspdlog.a'
+adding 'mujoco/plugin/libtinyobjloader.a'
+adding 'mujoco/plugin/libtinyxml2.a'
+adding 'UNKNOWN-0.0.0.dist-info/METADATA'
+adding 'UNKNOWN-0.0.0.dist-info/WHEEL'
+adding 'UNKNOWN-0.0.0.dist-info/top_level.txt'
+adding 'UNKNOWN-0.0.0.dist-info/RECORD'
+removing build/bdist.linux-x86_64/wheel
