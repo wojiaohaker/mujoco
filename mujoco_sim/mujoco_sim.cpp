@@ -944,6 +944,43 @@ void MujocoSim::ApplyControl() {
                 shared_state_.imu_acc[0], shared_state_.imu_acc[1], shared_state_.imu_acc[2]);
         fflush(diag_fp);
     }
+
+    // 站立轨迹高频抓取: CAPTURE=1 环境变量开启
+    // 每 2 步 (100Hz) 记录 base 姿态 + 12 关节 q/qdes, 用于反推 mc_ctrl 站立路点
+    static FILE* cap_fp = nullptr;
+    static bool cap_init = false;
+    if (!cap_init) {
+        cap_init = true;
+        if (getenv("CAPTURE") && std::string(getenv("CAPTURE")) == "1") {
+            cap_fp = fopen("/tmp/standup_capture.csv", "w");
+            if (cap_fp) {
+                fprintf(cap_fp, "# step time x y z qw qx qy qz");
+                const char* legN[4] = {"FR", "FL", "RL", "RR"};
+                for (int lg = 0; lg < 4; lg++)
+                    fprintf(cap_fp, " %s_ab_q %s_ab_d %s_hi_q %s_hi_d %s_kn_q %s_kn_d",
+                            legN[lg], legN[lg], legN[lg], legN[lg], legN[lg], legN[lg]);
+                fprintf(cap_fp, "\n");
+                printf("[CAPTURE] enabled -> /tmp/standup_capture.csv\n");
+            }
+        }
+    }
+    if (cap_fp && step_count_ % 2 == 0) {
+        fprintf(cap_fp, "%lu %.4f %.6f %.6f %.6f %.6f %.6f %.6f %.6f",
+                (unsigned long)step_count_, data_->time,
+                data_->qpos[0], data_->qpos[1], data_->qpos[2],
+                data_->qpos[3], data_->qpos[4], data_->qpos[5], data_->qpos[6]);
+        for (int leg = 0; leg < 4; leg++) {  // MuJoCo 腿序: FR FL RL RR
+            double ab_d = cmd.q_des_abad_size() > leg ? cmd.q_des_abad(leg) : 0;
+            double hi_d = cmd.q_des_hip_size()  > leg ? cmd.q_des_hip(leg)  : 0;
+            double kn_d = cmd.q_des_knee_size() > leg ? cmd.q_des_knee(leg) : 0;
+            fprintf(cap_fp, " %.6f %.6f %.6f %.6f %.6f %.6f",
+                    data_->qpos[7 + leg * 3 + 0], ab_d,
+                    data_->qpos[7 + leg * 3 + 1], hi_d,
+                    data_->qpos[7 + leg * 3 + 2], kn_d);
+        }
+        fprintf(cap_fp, "\n");
+        fflush(cap_fp);
+    }
 }
 
 robot_sdk::pb::RobotState MujocoSim::BuildRobotState() {
