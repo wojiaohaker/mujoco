@@ -877,9 +877,12 @@ void MujocoSim::ApplyControl() {
     }
 
     // 诊断日志: 每100步输出完整控制信息
+    // 路径可通过环境变量 MUJOCO_DIAG_LOG 配置，默认 /tmp/mujoco_diag.log
     static FILE* diag_fp = nullptr;
     if (!diag_fp) {
-        diag_fp = fopen("/tmp/mujoco_diag.log", "w");
+        const char* diag_path = getenv("MUJOCO_DIAG_LOG");
+        if (!diag_path || !diag_path[0]) diag_path = "/tmp/mujoco_diag.log";
+        diag_fp = fopen(diag_path, "w");
         if (diag_fp) {
             fprintf(diag_fp, "# step time base_x base_y base_z qw qx qy qz ");
             fprintf(diag_fp, "FR_ab_q FR_ab_qdes FR_ab_qd FR_ab_ctrl FR_ab_gcomp ");
