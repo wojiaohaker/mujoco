@@ -226,6 +226,13 @@ bool MujocoSim::LoadModel(const SimConfig& config) {
         return false;
     }
 
+    // 初始朝向: yaw=90° (面向 +y, 台阶在 +y 方向)
+    // quat = (cos(π/4), 0, 0, sin(π/4)) = (0.7071, 0, 0, 0.7071)
+    data_->qpos[3] = 0.70710678f;  // w
+    data_->qpos[4] = 0.0f;          // x
+    data_->qpos[5] = 0.0f;          // y
+    data_->qpos[6] = 0.70710678f;  // z
+
     // 初始化前向运动学
     mj_forward(model_, data_);
 
