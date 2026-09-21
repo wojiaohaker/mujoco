@@ -5,7 +5,7 @@
 robot: "xgb"
 
 # 场景文件 (在 robot 模型目录下)
-robot_scene: "scene.xml"
+robot_scene: "scene_terrain_yard.xml"
 
 # ===== 通信配置 =====
 
