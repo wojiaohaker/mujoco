@@ -108,15 +108,56 @@ struct SharedState {
     std::vector<float> base_linvel;
 
     // ---- 原始 MuJoCo 数据 (用于 UDP 9999 渲染同步) ----
-    double raw_qpos[19] = {};   // 完整 qpos: base_pos[3] + base_quat[4] + joints[12]
-    double raw_qvel[18] = {};   // 完整 qvel: base_vel[3] + base_angvel[3] + joints[12]
-    double raw_tau[12]  = {};   // 电机扭矩 (从 sensordata 读取)
+    // SIZED DYNAMICALLY to model_->nq/nv/nu in Initialize().
+    // XGB: nq=19, nv=18, nu=12. XGW: nq=23, nv=22, nu=16.
+    std::vector<double> raw_qpos;   // 完整 qpos (freejoint + all joints)
+    std::vector<double> raw_qvel;   // 完整 qvel (base vel + all joint vels)
+    std::vector<double> raw_tau;    // 电机扭矩 (从 sensordata 读取, nu 个)
 
     // 仿真时间
     double sim_time = 0.0;
 
     // 写入时间戳 (用于 Bridge 判断数据新鲜度)
     uint64_t write_seq = 0;
+};
+
+// ==================== 模型关节布局 (通用化) ====================
+//
+// 不硬编码 "每腿 3 关节 + 步长 3"。
+// LoadModel 后扫描所有关节，按名字匹配关键字 (ABAD/HIP/KNEE/FOOT)，
+// 用 model->jnt_qposadr / model->jnt_dofadr / sensor_adr 拿到真实索引。
+//
+// 这样同时支持 XGB(njnt=12, 每腿3)、XGW(njnt=16, 每腿4) 以及任何四足模型。
+
+enum class JointRole {
+    Abad,   // 外展
+    Hip,    // 髋
+    Knee,   // 膝
+    Foot,   // 轮(被动/非 policy)
+    Other   // 自由关节 / weld / 其他
+};
+
+struct JointEntry {
+    std::string name;
+    JointRole role;
+    int jnt_id;          // model 里的 joint 索引
+    int qpos_adr;        // model->jnt_qposadr[jnt_id] → data_->qpos[qpos_adr]
+    int qvel_adr;        // model->jnt_dofadr[jnt_id] → data_->qvel[qvel_adr]
+    int actuator_id = -1; // 控制这个 joint 的 actuator 索引 (通过 actuator_trnid 动态查找)
+};
+
+/**
+ * @brief 存储扫描后的关节布局 —— 加载一次后在 PhysicsStep 里复用，避免硬编码索引。
+ */
+struct ModelLayout {
+    std::vector<JointEntry> abad;     // 4 个外展关节 (ABAD)
+    std::vector<JointEntry> hip;      // 4 个髋关节
+    std::vector<JointEntry> knee;     // 4 个膝关节
+    std::vector<JointEntry> foot;     // 4 个轮子关节 (如果有)
+
+    int total_active = 0;             // abad + hip + knee 的总数（= 12，对四足固定）
+    int tau_sensor_adr = -1;          // jointactuatorfrc sensor 的 sensordata 起始偏移 (动态查找)
+    int tau_sensor_dim = 0;           // jointactuatorfrc sensor 的维度
 };
 
 // ==================== 仿真器 ====================
@@ -162,6 +203,9 @@ private:
     // 打印模型信息
     void PrintModelInfo();
 
+    // 扫描关节布局（通用化：不硬编码每腿 3 关节）
+    void ScanModelLayout();
+
     // ---- 线程 ----
 
     /**
@@ -205,6 +249,9 @@ private:
     std::mutex state_mutex_;
     SharedState shared_state_;
 
+    // 动态扫描得到的关节布局 —— 供 WriteSharedState/ApplyControl 复用
+    ModelLayout layout_;
+
     // 控制命令 (eCAL 回调写入, 物理线程读取)
     std::mutex cmd_mutex_;
     robot_sdk::pb::RobotCmd latest_cmd_;
@@ -235,7 +282,7 @@ private:
 
     // 延迟一步的 qfrc_bias[6:17] (关节部分)
     // mj_step 后保存, 用于下一步的重力补偿 (PASSIVE 模式也需要)
-    double prev_grav_comp_[12] = {};
+    std::vector<double> prev_grav_comp_;
 
 
 

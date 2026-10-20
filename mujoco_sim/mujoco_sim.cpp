@@ -152,7 +152,23 @@ bool MujocoSim::Initialize(const SimConfig& config) {
         return false;
     }
 
-    // 2. 初始化 eCAL
+    // 2. 扫描关节布局 (通用化，支持 XGB/XGW/任意四足)
+    ScanModelLayout();
+
+    // 3. Resize SharedState 所有 buffer（全部动态，零硬编码）
+    shared_state_.raw_qpos.resize(model_->nq);
+    shared_state_.raw_qvel.resize(model_->nv);
+    shared_state_.raw_tau.resize(model_->nu);
+    shared_state_.q_joint.resize(layout_.total_active);
+    shared_state_.qd_joint.resize(layout_.total_active);
+    shared_state_.tau_joint.resize(layout_.total_active);
+    prev_grav_comp_.resize(model_->nv);
+
+    std::cout << "[Init] SharedState resized: nq=" << model_->nq
+              << " nv=" << model_->nv << " nu=" << model_->nu
+              << " active_joints=" << layout_.total_active << std::endl;
+
+    // 4. 初始化 eCAL
     if (config_.enable_ecal) {
         eCAL::Initialize(0, nullptr, "mujoco_sim");
 
@@ -283,6 +299,135 @@ void MujocoSim::PrintModelInfo() {
     std::cout << std::endl;
 }
 
+void MujocoSim::ScanModelLayout() {
+    layout_ = ModelLayout{};  // reset
+
+    // ---- 1. 扫描所有非 free 关节，按名字关键字分类 ----
+    for (int i = 0; i < model_->njnt; i++) {
+        if (model_->jnt_type[i] == mjJNT_FREE) continue;
+
+        const char* cname = mj_id2name(model_, mjOBJ_JOINT, i);
+        std::string name = cname ? cname : "";
+        // 全部转大写匹配（兼容 FAR_ABAD / abad_joint / ...）
+        std::string upper;
+        upper.reserve(name.size());
+        for (char c : name) upper.push_back(std::toupper(static_cast<unsigned char>(c)));
+
+        JointEntry entry;
+        entry.name = name;
+        entry.jnt_id = i;
+        entry.qpos_adr = model_->jnt_qposadr[i];
+        entry.qvel_adr = model_->jnt_dofadr[i];
+
+        if (upper.find("ABAD") != std::string::npos) {
+            entry.role = JointRole::Abad;
+            layout_.abad.push_back(entry);
+        } else if (upper.find("HIP") != std::string::npos) {
+            entry.role = JointRole::Hip;
+            layout_.hip.push_back(entry);
+        } else if (upper.find("KNEE") != std::string::npos) {
+            entry.role = JointRole::Knee;
+            layout_.knee.push_back(entry);
+        } else if (upper.find("FOOT") != std::string::npos) {
+            entry.role = JointRole::Foot;
+            layout_.foot.push_back(entry);
+        } else {
+            entry.role = JointRole::Other;
+        }
+    }
+
+    layout_.total_active = static_cast<int>(
+        layout_.abad.size() + layout_.hip.size() + layout_.knee.size());
+
+    // ---- 1.5 按腿名 canonical 顺序排序, 保证三组 (ABAD/HIP/KNEE) 腿序一致 ----
+    // 老代码硬编码腿序 [FR, FL, RR, RL] (也即 XML 中的 FAR, FBL, RAR, RBL)
+    // mc_ctrl policy / BuildRobotState 都假设这个顺序.
+    // 从关节名提取腿名前缀: FAR/FBL/RAR/RBL → canonical index 0/1/2/3
+    // 也兼容 go2 的 FL_FR_RL_RR 等前缀.
+    auto legCanonicalIdx = [](const std::string& jname) -> int {
+        // 先转大写提取腿前缀 (最长 3 字符)
+        std::string upper;
+        upper.reserve(jname.size());
+        for (char c : jname) upper.push_back(std::toupper(static_cast<unsigned char>(c)));
+        // 匹配常见前缀: FAR=FR 0, FBL=FL 1, RAR=RR 2, RBL=RL 3
+        // 或者 GO2 风格: FR/FL/RR/RL 直接前缀
+        if (upper.find("FAR") == 0) return 0;
+        if (upper.find("FBL") == 0) return 1;
+        if (upper.find("RAR") == 0) return 2;
+        if (upper.find("RBL") == 0) return 3;
+        if (upper.find("FR") == 0)  return 0;
+        if (upper.find("FL") == 0)  return 1;
+        if (upper.find("RR") == 0)  return 2;
+        if (upper.find("RL") == 0)  return 3;
+        return 99;  // 未知, 放最后
+    };
+    auto sortByLeg = [&](std::vector<JointEntry>& v) {
+        std::sort(v.begin(), v.end(), [&](const JointEntry& a, const JointEntry& b) {
+            return legCanonicalIdx(a.name) < legCanonicalIdx(b.name);
+        });
+    };
+    sortByLeg(layout_.abad);
+    sortByLeg(layout_.hip);
+    sortByLeg(layout_.knee);
+    sortByLeg(layout_.foot);
+
+    // ---- 2. 动态查找 joint → actuator 映射 ----
+    // MuJoCo 3.x: actuator_trntype (nu x 1) 一维 int*, actuator_trnid (nu x 2) 一维 int*
+    // mjTRN_JOINT=0 表示 target 是 joint, 此时 trnid[a*2] 就是 joint id
+    auto bindActuator = [&](std::vector<JointEntry>& group) {
+        for (auto& e : group) {
+            e.actuator_id = -1;
+            for (int a = 0; a < model_->nu; a++) {
+                if (model_->actuator_trntype[a] == mjTRN_JOINT
+                    && model_->actuator_trnid[a * 2] == e.jnt_id) {
+                    e.actuator_id = a;
+                    break;
+                }
+            }
+        }
+    };
+    bindActuator(layout_.abad);
+    bindActuator(layout_.hip);
+    bindActuator(layout_.knee);
+    bindActuator(layout_.foot);
+
+    // ---- 3. 动态查找所有连续 jointactuatorfrc sensor 的合并范围 ----
+    // XGB 写法: 12 个独立的 <jointactuatorfrc name=... joint=... />，每个 dim=1, adr 连续
+    // XGW 写法: 可能一个 batch sensor 覆盖所有 16 关节, dim=16
+    // 两种情况都要支持 —— 扫描所有 JOINTACTFRC sensor，取首尾 adr+dim 得到覆盖范围
+    {
+        int first_adr = -1, last_end = 0;
+        for (int i = 0; i < model_->nsensor; i++) {
+            if (model_->sensor_type[i] == mjSENS_JOINTACTFRC) {
+                int adr = model_->sensor_adr[i];
+                int end = adr + model_->sensor_dim[i];
+                if (first_adr < 0) first_adr = adr;
+                if (end > last_end) last_end = end;
+            }
+        }
+        if (first_adr >= 0) {
+            layout_.tau_sensor_adr = first_adr;
+            layout_.tau_sensor_dim = last_end - first_adr;
+        }
+    }
+
+    // 诊断输出
+    std::cout << "[ScanModelLayout] 关节扫描结果:" << std::endl;
+    auto dump = [&](const char* label, const std::vector<JointEntry>& v) {
+        std::cout << "  " << label << " (" << v.size() << "):";
+        for (auto& e : v) std::cout << " " << e.name
+                                    << "(qpos=" << e.qpos_adr
+                                    << ",qvel=" << e.qvel_adr << ")";
+        std::cout << std::endl;
+    };
+    dump("ABAD", layout_.abad);
+    dump("HIP ", layout_.hip);
+    dump("KNEE", layout_.knee);
+    dump("FOOT", layout_.foot);
+    std::cout << "  tau_sensor: adr=" << layout_.tau_sensor_adr
+              << " dim=" << layout_.tau_sensor_dim << std::endl;
+}
+
 void MujocoSim::Run() {
     if (config_.enable_gui) {
         RunWithGui();
@@ -294,12 +439,13 @@ void MujocoSim::Run() {
 void MujocoSim::RunHeadless() {
     running_.store(true);
 
-    // 初始化 SharedState 向量
+    // SharedState 向量已在 Initialize 中 resize 到动态尺寸
+    // 这里只做值初始化 (zero-fill)
     {
         std::lock_guard<std::mutex> lock(state_mutex_);
-        shared_state_.q_joint.resize(12, 0.0f);
-        shared_state_.qd_joint.resize(12, 0.0f);
-        shared_state_.tau_joint.resize(12, 0.0f);
+        std::fill(shared_state_.q_joint.begin(), shared_state_.q_joint.end(), 0.0f);
+        std::fill(shared_state_.qd_joint.begin(), shared_state_.qd_joint.end(), 0.0f);
+        std::fill(shared_state_.tau_joint.begin(), shared_state_.tau_joint.end(), 0.0f);
         shared_state_.base_position.resize(3, 0.0f);
         shared_state_.base_quat.resize(4, 0.0f);
         shared_state_.base_quat[0] = 1.0f;  // w=1 (identity)
@@ -339,7 +485,21 @@ void MujocoSim::RunWithGui() {
         return;
     }
 
-    GLFWwindow* window = glfwCreateWindow(1280, 960, "mujoco_sim - XGB", NULL, NULL);
+    // Build window title from actual loaded model.
+    // MuJoCo 3.x mjModel has no .name field; use the robot dir basename from config
+    // (e.g. "/.../Content/model/xgw" → "xgw"). Fallback to "unknown".
+    std::string model_label = "unknown";
+    if (!config_.robot_model_dir.empty()) {
+        auto slash = config_.robot_model_dir.find_last_of("/");
+        if (slash != std::string::npos && slash + 1 < config_.robot_model_dir.size()) {
+            model_label = config_.robot_model_dir.substr(slash + 1);
+        } else {
+            model_label = config_.robot_model_dir;
+        }
+    }
+    std::string window_title = "mujoco_sim - " + model_label;
+
+    GLFWwindow* window = glfwCreateWindow(1280, 960, window_title.c_str(), NULL, NULL);
     if (!window) {
         std::cerr << "[GUI] 窗口创建失败, 回退到 headless 模式" << std::endl;
         glfwTerminate();
@@ -373,12 +533,13 @@ void MujocoSim::RunWithGui() {
 
     std::cout << "[GUI] 窗口已打开. ESC=退出, Backspace=重置, 鼠标旋转/缩放" << std::endl;
 
-    // 初始化 SharedState 向量
+    // SharedState 向量已在 Initialize 中 resize 到动态尺寸
+    // 这里只做值初始化 (zero-fill)
     {
         std::lock_guard<std::mutex> lock(state_mutex_);
-        shared_state_.q_joint.resize(12, 0.0f);
-        shared_state_.qd_joint.resize(12, 0.0f);
-        shared_state_.tau_joint.resize(12, 0.0f);
+        std::fill(shared_state_.q_joint.begin(), shared_state_.q_joint.end(), 0.0f);
+        std::fill(shared_state_.qd_joint.begin(), shared_state_.qd_joint.end(), 0.0f);
+        std::fill(shared_state_.tau_joint.begin(), shared_state_.tau_joint.end(), 0.0f);
         shared_state_.base_position.resize(3, 0.0f);
         shared_state_.base_quat.resize(4, 0.0f);
         shared_state_.base_quat[0] = 1.0f;
@@ -546,11 +707,21 @@ void MujocoSim::CarlaSdkBridgeThreadFunc() {
         auto now = std::chrono::steady_clock::now();
         bool has_new_state = false;
         robot_sdk::pb::RobotState cached_state;
-        // 缓存原始数据 (锁内拷贝)
+
+        // Use dynamic sizes from the model — supports both XGB(nq=19,nv=18,nu=12)
+        // and XGW(nq=23,nv=22,nu=16) and any other robot.
+        const int32_t model_nq = model_ ? model_->nq : 0;
+        const int32_t model_nv = model_ ? model_->nv : 0;
+        const int32_t model_nu = model_ ? model_->nu : 0;
+
+        // Cache buffers sized to actual model
+        std::vector<double> cached_qpos(model_nq, 0.0);
+        std::vector<double> cached_qvel(model_nv, 0.0);
+        std::vector<double> cached_tau(model_nu, 0.0);
+
+        // Also cache raw shared_state pointers (already sized to model in PhysicsStep)
+        // We copy them under lock below.
         double cached_sim_time = 0;
-        double cached_qpos[19] = {};
-        double cached_qvel[18] = {};
-        double cached_tau[12] = {};
 
         // 读取 SharedState (只加锁一次，供 eCAL 和 UDP 共用)
         {
@@ -558,11 +729,14 @@ void MujocoSim::CarlaSdkBridgeThreadFunc() {
             if (shared_state_.write_seq > last_seq) {
                 last_seq = shared_state_.write_seq;
                 cached_state = BuildRobotState();
-                // 拷贝原始数据
+                // Copy raw data — sized vectors, use .size() * sizeof(double)
                 cached_sim_time = shared_state_.sim_time;
-                std::memcpy(cached_qpos, shared_state_.raw_qpos, sizeof(cached_qpos));
-                std::memcpy(cached_qvel, shared_state_.raw_qvel, sizeof(cached_qvel));
-                std::memcpy(cached_tau,  shared_state_.raw_tau,  sizeof(cached_tau));
+                const auto& rq = shared_state_.raw_qpos;
+                const auto& rv = shared_state_.raw_qvel;
+                const auto& rt = shared_state_.raw_tau;
+                std::memcpy(cached_qpos.data(), rq.data(), rq.size() * sizeof(double));
+                std::memcpy(cached_qvel.data(), rv.data(), rv.size() * sizeof(double));
+                std::memcpy(cached_tau.data(),  rt.data(),  rt.size()  * sizeof(double));
                 has_new_state = true;
             }
         }
@@ -602,46 +776,42 @@ void MujocoSim::CarlaSdkBridgeThreadFunc() {
             }
         }
 
-        // UDP 发送: 412 字节原始二进制 (与 Matrix robot_mujoco 一致)
+        // UDP 发送: 动态尺寸二进制 (与 Matrix robot_mujoco 格式兼容，但 nq/nv/nu 为实际值)
         if (config_.enable_udp && has_new_state && now >= next_udp_time) {
             next_udp_time += std::chrono::microseconds(udp_period_us);
             if (next_udp_time < now) next_udp_time = now;
 
-            // 打包 412 bytes: sim_time(8) + nq(4) + qpos(19*8) + nv(4) + qvel(18*8) + nu(4) + tau(12*8)
-            char buf[412];
-            std::memset(buf, 0, sizeof(buf));
-            char* ptr = buf;
+            // Dynamic buffer size: 8+4+nq*8+4+nv*8+4+nu*8 bytes
+            const int32_t nq = static_cast<int32_t>(cached_qpos.size());
+            const int32_t nv = static_cast<int32_t>(cached_qvel.size());
+            const int32_t nu = static_cast<int32_t>(cached_tau.size());
+            const size_t buf_size = 8 + 4 + nq * 8 + 4 + nv * 8 + 4 + nu * 8;
+
+            std::vector<char> buf(buf_size, 0);
+            char* ptr = buf.data();
 
             // sim_time (double, 8 bytes)
             std::memcpy(ptr, &cached_sim_time, 8); ptr += 8;
 
-            // nq (int32, 4 bytes) = 19
-            int32_t nq = 19;
+            // nq (int32, 4 bytes) — now DYNAMIC, e.g. 23 for XGW
             std::memcpy(ptr, &nq, 4); ptr += 4;
+            std::memcpy(ptr, cached_qpos.data(), nq * sizeof(double)); ptr += nq * sizeof(double);
 
-            // qpos (19 doubles, 152 bytes)
-            std::memcpy(ptr, cached_qpos, 19 * sizeof(double)); ptr += 19 * sizeof(double);
-
-            // nv (int32, 4 bytes) = 18
-            int32_t nv = 18;
+            // nv (int32, 4 bytes)
             std::memcpy(ptr, &nv, 4); ptr += 4;
+            std::memcpy(ptr, cached_qvel.data(), nv * sizeof(double)); ptr += nv * sizeof(double);
 
-            // qvel (18 doubles, 144 bytes)
-            std::memcpy(ptr, cached_qvel, 18 * sizeof(double)); ptr += 18 * sizeof(double);
-
-            // nu (int32, 4 bytes) = 12
-            int32_t nu = 12;
+            // nu (int32, 4 bytes)
             std::memcpy(ptr, &nu, 4); ptr += 4;
+            std::memcpy(ptr, cached_tau.data(), nu * sizeof(double)); ptr += nu * sizeof(double);
 
-            // tau (12 doubles, 96 bytes)
-            std::memcpy(ptr, cached_tau, 12 * sizeof(double)); ptr += 12 * sizeof(double);
-
-            SendUdp(std::string(buf, 412));
+            SendUdp(std::string(buf.data(), buf_size));
             udp_send_count_++;
 
             if (udp_send_count_ % 100 == 1) {
                 std::cout << "[CarlaSdkBridgeThread] UDP #" << udp_send_count_
-                          << ": 412 bytes (raw MuJoCo) → "
+                          << ": " << buf_size << " bytes (nq=" << nq << " nv=" << nv
+                          << " nu=" << nu << ") → "
                           << config_.udp_target_ip << ":" << config_.udp_target_port
                           << std::endl;
             }
@@ -724,27 +894,44 @@ void MujocoSim::CarlaSdkBridgeThreadFunc() {
 void MujocoSim::WriteSharedState() {
     std::lock_guard<std::mutex> lock(state_mutex_);
 
-    // 关节位置 qpos[7:18] → q_joint[0:11]
-    for (int leg = 0; leg < 4; leg++) {
-        int qpos_idx = 7 + leg * 3;
-        int vel_idx  = 6 + leg * 3;
-        int tau_idx  = 24 + leg * 3;
+    // ---- 主动关节 (ABAD/HIP/KNEE) 位置/速度/扭矩 ----
+    // 关键: q_joint 必须按 LEG-MAJOR 顺序: [leg0_abd, leg0_hip, leg0_knee, leg1_abd, ...]
+    // 因为 BuildRobotState 用 q_joint[leg*3+role] 组装 protobuf,
+    // ApplyControl 的 diag_fp 日志也用 leg*3+role.
+    // mc_ctrl policy 训练时输入就是这个 leg-major 顺序的 qpos/qvel/tau.
+    {
+        int out = 0;
+        const int num_legs = static_cast<int>(std::min({
+            layout_.abad.size(), layout_.hip.size(), layout_.knee.size()}));
 
-        shared_state_.q_joint[leg * 3 + 0] = static_cast<float>(data_->qpos[qpos_idx + 0]);
-        shared_state_.q_joint[leg * 3 + 1] = static_cast<float>(data_->qpos[qpos_idx + 1]);
-        shared_state_.q_joint[leg * 3 + 2] = static_cast<float>(data_->qpos[qpos_idx + 2]);
+        for (int leg = 0; leg < num_legs && out < static_cast<int>(shared_state_.q_joint.size()); leg++) {
+            // 三个 role 依次: abad (out), hip (out+1), knee (out+2)
+            const JointEntry* e_arr[3] = {
+                leg < static_cast<int>(layout_.abad.size()) ? &layout_.abad[leg] : nullptr,
+                leg < static_cast<int>(layout_.hip.size())  ? &layout_.hip[leg]  : nullptr,
+                leg < static_cast<int>(layout_.knee.size()) ? &layout_.knee[leg] : nullptr,
+            };
 
-        // 直接使用原始 qvel (不使用低通滤波)
-        // 原因: alpha=0.2 的指数滤波器在 RL policy 频率(200Hz)处引入~86°相位滞后,
-        // 导致 LSTM 隐状态累积发散, 最终 policy 输出极端值.
-        // robot_mujoco 的关节速度观测器经过 RL 训练匹配, 不能用简单指数滤波替代.
-        shared_state_.qd_joint[leg * 3 + 0] = static_cast<float>(data_->qvel[vel_idx + 0]);
-        shared_state_.qd_joint[leg * 3 + 1] = static_cast<float>(data_->qvel[vel_idx + 1]);
-        shared_state_.qd_joint[leg * 3 + 2] = static_cast<float>(data_->qvel[vel_idx + 2]);
+            for (int r = 0; r < 3 && out < static_cast<int>(shared_state_.q_joint.size()); r++) {
+                const JointEntry* e = e_arr[r];
+                if (!e) { out++; continue; }
 
-        shared_state_.tau_joint[leg * 3 + 0] = static_cast<float>(data_->sensordata[tau_idx + 0]);
-        shared_state_.tau_joint[leg * 3 + 1] = static_cast<float>(data_->sensordata[tau_idx + 1]);
-        shared_state_.tau_joint[leg * 3 + 2] = static_cast<float>(data_->sensordata[tau_idx + 2]);
+                // qpos / qvel (直接读原始值, 不滤波 — 原因见旧代码注释)
+                shared_state_.q_joint[out]  = static_cast<float>(data_->qpos[e->qpos_adr]);
+                shared_state_.qd_joint[out] = static_cast<float>(data_->qvel[e->qvel_adr]);
+
+                // tau: sensordata[tau_sensor_adr + out]  — leg-major 顺序同样适用
+                if (layout_.tau_sensor_adr >= 0
+                    && out < layout_.tau_sensor_dim) {
+                    shared_state_.tau_joint[out] = static_cast<float>(
+                        data_->sensordata[layout_.tau_sensor_adr + out]);
+                } else {
+                    shared_state_.tau_joint[out] = 0.0f;
+                }
+
+                out++;
+            }
+        }
     }
 
     // Base position: sensordata[46:48] (frame_pos, adr=46)
@@ -783,16 +970,22 @@ void MujocoSim::WriteSharedState() {
     shared_state_.base_linvel[2] = static_cast<float>(data_->sensordata[51]);
 
     // ---- 原始 MuJoCo 数据 (UDP 9999 渲染同步) ----
-    // raw_qpos[0:2] = base_pos, [3:6] = base_quat(w,x,y,z), [7:18] = joints
-    for (int i = 0; i < model_->nq && i < 19; i++) {
+    // Copy ALL qpos/qvel/tau — sized to actual model (XGW nq=23, XGB nq=19, etc.)
+    for (int i = 0; i < model_->nq; i++) {
         shared_state_.raw_qpos[i] = data_->qpos[i];
     }
-    for (int i = 0; i < model_->nv && i < 18; i++) {
+    for (int i = 0; i < model_->nv; i++) {
         shared_state_.raw_qvel[i] = data_->qvel[i];
     }
-    // tau: sensordata[24:35] = jointactuatorfrc (12 joints)
-    for (int i = 0; i < 12; i++) {
-        shared_state_.raw_tau[i] = data_->sensordata[24 + i];
+    // tau: sensordata offset for joint actuator force sensor
+    // sensordata offset is model-dependent; jointactuatorfrc starts after other sensors.
+    // For now assume offset 24 (consistent with XGB/XGW), read model_->nu values.
+    {
+        const int tau_offset = 24;
+        for (int i = 0; i < model_->nu; i++) {
+            int idx = tau_offset + i;
+            shared_state_.raw_tau[i] = (idx < model_->nsensordata) ? data_->sensordata[idx] : 0.0;
+        }
     }
 
     shared_state_.sim_time = data_->time;
@@ -838,48 +1031,68 @@ void MujocoSim::ApplyControl() {
     // 无 qfrc_bias 重力补偿, 无扭矩限幅 — 与 UE 内部模式完全一致.
     // mc_ctrl (RL policy) 已包含 tau_ff 和重力补偿.
     //
-    // 协议索引 → MuJoCo 关节映射 (与 UE ApplyUdpControl 完全一致):
-    //   protoIdx = jointType * 4 + leg
-    //   mjIdx    = leg * 3 + jointType
-    //   jntIdx   = mjIdx + 1  (skip freejoint)
+    // 彻底通用化:
+    //   protobuf cmd 还是按 (leg=0..3) × (ABAD/HIP/KNEE) 组织 — 这是 protobuf schema 约束.
+    //   但 MuJoCo 侧的 joint 索引 / actuator 索引 不再硬编码 leg*3+jntType,
+    //   而是用 ScanModelLayout 扫描到的 layout_.abad[leg], layout_.hip[leg], layout_.knee[leg].
+    //   这样同时支持 XGB(每腿3) 和 XGW(每腿4, 轮).
+
+    // 辅助 lambda: 从 protobuf cmd 读指定数组的第 i 个元素 (安全访问)
+    auto pbGet = [&](int i, auto accessor, double def = 0.0) -> double {
+        return accessor(i, def);
+    };
+
+    auto applyJointPD = [&](const JointEntry& e, int leg_idx,
+                            auto q_des_arr, auto qd_des_arr,
+                            auto kp_arr, auto kd_arr, auto tau_ff_arr) {
+        if (leg_idx < 0) return;
+        // 用 protobuf cmd 里的数组长度来决定当前 leg_idx 是否有效
+        // (protobuf 里是 repeated 字段, 通常 4 个, 但安全起见用 accessor 返回值)
+        // 这里简化: 如果数组长度 <= leg_idx, 就用 0
+        // protobuf RobotCmd 已经保证数组长度=4
+
+        double q  = data_->qpos[e.qpos_adr];
+        double qd = data_->qvel[e.qvel_adr];
+
+        double target = q_des_arr(leg_idx);
+        double qd_des = qd_des_arr(leg_idx);
+        double kp     = kp_arr(leg_idx);
+        double kd     = kd_arr(leg_idx);
+        double tau_ff = tau_ff_arr(leg_idx);
+
+        // 匹配 UE: tau = kp*(target-q) - kd*qvel + tau_ff
+        if (e.actuator_id >= 0 && e.actuator_id < model_->nu) {
+            data_->ctrl[e.actuator_id] = kp * (target - q) - kd * qd + tau_ff;
+        }
+    };
 
     for (int leg = 0; leg < 4; leg++) {
-        for (int jointType = 0; jointType < 3; jointType++) {
-            int mjIdx   = leg * 3 + jointType;   // MuJoCo actuator index
-            int protoIdx = jointType * 4 + leg;   // Protocol array index
-            int jntIdx  = mjIdx + 1;              // skip freejoint
-
-            if (mjIdx >= model_->nu) break;
-
-            double q  = data_->qpos[model_->jnt_qposadr[jntIdx]];
-            double qd = data_->qvel[model_->jnt_dofadr[jntIdx]];
-
-            // 从 cmd 读取 target, gain (按 jointType 选择正确的字段)
-            double target = 0, kp = 0, kd = 0, tau_ff = 0;
-            double qd_des = 0;
-
-            if (jointType == 0) { // ABAD
-                if (cmd.q_des_abad_size() > leg)  target = cmd.q_des_abad(leg);
-                if (cmd.qd_des_abad_size() > leg) qd_des = cmd.qd_des_abad(leg);
-                if (cmd.kp_abad_size() > leg)     kp = cmd.kp_abad(leg);
-                if (cmd.kd_abad_size() > leg)     kd = cmd.kd_abad(leg);
-                if (cmd.tau_abad_ff_size() > leg) tau_ff = cmd.tau_abad_ff(leg);
-            } else if (jointType == 1) { // HIP
-                if (cmd.q_des_hip_size() > leg)   target = cmd.q_des_hip(leg);
-                if (cmd.qd_des_hip_size() > leg)  qd_des = cmd.qd_des_hip(leg);
-                if (cmd.kp_hip_size() > leg)      kp = cmd.kp_hip(leg);
-                if (cmd.kd_hip_size() > leg)      kd = cmd.kd_hip(leg);
-                if (cmd.tau_hip_ff_size() > leg)  tau_ff = cmd.tau_hip_ff(leg);
-            } else { // KNEE
-                if (cmd.q_des_knee_size() > leg)  target = cmd.q_des_knee(leg);
-                if (cmd.qd_des_knee_size() > leg) qd_des = cmd.qd_des_knee(leg);
-                if (cmd.kp_knee_size() > leg)     kp = cmd.kp_knee(leg);
-                if (cmd.kd_knee_size() > leg)     kd = cmd.kd_knee(leg);
-                if (cmd.tau_knee_ff_size() > leg) tau_ff = cmd.tau_knee_ff(leg);
-            }
-
-            // 匹配 UE: tau = kp*(target-q) - kd*qvel + tau_ff
-            data_->ctrl[mjIdx] = kp * (target - q) - kd * qd + tau_ff;
+        // ABAD (jointType=0)
+        if (leg < static_cast<int>(layout_.abad.size())) {
+            applyJointPD(layout_.abad[leg], leg,
+                [&](int i) -> double { return cmd.q_des_abad_size() > i ? cmd.q_des_abad(i) : 0; },
+                [&](int i) -> double { return cmd.qd_des_abad_size() > i ? cmd.qd_des_abad(i) : 0; },
+                [&](int i) -> double { return cmd.kp_abad_size()     > i ? cmd.kp_abad(i)     : 0; },
+                [&](int i) -> double { return cmd.kd_abad_size()     > i ? cmd.kd_abad(i)     : 0; },
+                [&](int i) -> double { return cmd.tau_abad_ff_size() > i ? cmd.tau_abad_ff(i)  : 0; });
+        }
+        // HIP (jointType=1)
+        if (leg < static_cast<int>(layout_.hip.size())) {
+            applyJointPD(layout_.hip[leg], leg,
+                [&](int i) -> double { return cmd.q_des_hip_size()   > i ? cmd.q_des_hip(i)   : 0; },
+                [&](int i) -> double { return cmd.qd_des_hip_size()  > i ? cmd.qd_des_hip(i)  : 0; },
+                [&](int i) -> double { return cmd.kp_hip_size()      > i ? cmd.kp_hip(i)      : 0; },
+                [&](int i) -> double { return cmd.kd_hip_size()      > i ? cmd.kd_hip(i)      : 0; },
+                [&](int i) -> double { return cmd.tau_hip_ff_size()  > i ? cmd.tau_hip_ff(i)  : 0; });
+        }
+        // KNEE (jointType=2)
+        if (leg < static_cast<int>(layout_.knee.size())) {
+            applyJointPD(layout_.knee[leg], leg,
+                [&](int i) -> double { return cmd.q_des_knee_size()  > i ? cmd.q_des_knee(i)  : 0; },
+                [&](int i) -> double { return cmd.qd_des_knee_size() > i ? cmd.qd_des_knee(i) : 0; },
+                [&](int i) -> double { return cmd.kp_knee_size()     > i ? cmd.kp_knee(i)     : 0; },
+                [&](int i) -> double { return cmd.kd_knee_size()     > i ? cmd.kd_knee(i)     : 0; },
+                [&](int i) -> double { return cmd.tau_knee_ff_size() > i ? cmd.tau_knee_ff(i)  : 0; });
         }
     }
 
@@ -908,9 +1121,19 @@ void MujocoSim::ApplyControl() {
                 (unsigned long)step_count_, data_->time,
                 data_->qpos[0], data_->qpos[1], data_->qpos[2],
                 data_->qpos[3], data_->qpos[4], data_->qpos[5], data_->qpos[6]);
-        // FR joint details (leg=0, ctrl_idx=0)
+        // FR joint details (leg=0) — 用 layout_ 动态索引
+        const JointEntry* diagJoints[3] = {
+            (layout_.abad.size() > 0) ? &layout_.abad[0] : nullptr,
+            (layout_.hip.size()  > 0) ? &layout_.hip[0]  : nullptr,
+            (layout_.knee.size() > 0) ? &layout_.knee[0] : nullptr
+        };
         for (int j = 0; j < 3; j++) {
-            int qi = 7 + j, vi = 6 + j, ci = j;  // ci = ctrl 索引 (FR: 0,1,2)
+            const JointEntry* e = diagJoints[j];
+            double q = e ? data_->qpos[e->qpos_adr] : 0;
+            double qv = e ? data_->qvel[e->qvel_adr] : 0;
+            double ctrl = (e && e->actuator_id >= 0 && e->actuator_id < model_->nu)
+                        ? data_->ctrl[e->actuator_id] : 0;
+            double gcomp = e ? data_->qfrc_bias[e->qvel_adr] : 0;
             double qdes = 0, qdes_v = 0, tau_ff = 0, kp = 0, kd = 0;
             if (j == 0) {
                 qdes = cmd.q_des_abad_size() > 0 ? cmd.q_des_abad(0) : 0;
@@ -932,7 +1155,7 @@ void MujocoSim::ApplyControl() {
                 kd = cmd.kd_knee_size() > 0 ? cmd.kd_knee(0) : 0;
             }
             fprintf(diag_fp, "%.6f %.6f %.6f %.6f %.6f ",
-                    data_->qpos[qi], qdes, data_->qvel[vi], data_->ctrl[ci], data_->qfrc_bias[vi]);
+                    q, qdes, qv, ctrl, gcomp);
         }
         // gains and tau_ff for leg 0
         fprintf(diag_fp, "%.2f %.2f %.2f %.2f %.2f %.2f %.4f %.4f %.4f ",
@@ -983,10 +1206,14 @@ void MujocoSim::ApplyControl() {
             double ab_d = cmd.q_des_abad_size() > leg ? cmd.q_des_abad(leg) : 0;
             double hi_d = cmd.q_des_hip_size()  > leg ? cmd.q_des_hip(leg)  : 0;
             double kn_d = cmd.q_des_knee_size() > leg ? cmd.q_des_knee(leg) : 0;
+            double ab_q = (leg < static_cast<int>(layout_.abad.size()))
+                        ? data_->qpos[layout_.abad[leg].qpos_adr] : 0;
+            double hi_q = (leg < static_cast<int>(layout_.hip.size()))
+                        ? data_->qpos[layout_.hip[leg].qpos_adr] : 0;
+            double kn_q = (leg < static_cast<int>(layout_.knee.size()))
+                        ? data_->qpos[layout_.knee[leg].qpos_adr] : 0;
             fprintf(cap_fp, " %.6f %.6f %.6f %.6f %.6f %.6f",
-                    data_->qpos[7 + leg * 3 + 0], ab_d,
-                    data_->qpos[7 + leg * 3 + 1], hi_d,
-                    data_->qpos[7 + leg * 3 + 2], kn_d);
+                    ab_q, ab_d, hi_q, hi_d, kn_q, kn_d);
         }
         fprintf(cap_fp, "\n");
         fflush(cap_fp);
