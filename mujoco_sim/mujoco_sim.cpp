@@ -371,6 +371,14 @@ void MujocoSim::ScanModelLayout() {
     sortByLeg(layout_.knee);
     sortByLeg(layout_.foot);
 
+    // ---- 1.6 计算腿数与每腿关节数 (决定 stride) ----
+    layout_.num_legs = static_cast<int>(std::min({
+        layout_.abad.size(), layout_.hip.size(), layout_.knee.size()}));
+    const bool has_wheel = !layout_.foot.empty()
+                        && static_cast<int>(layout_.foot.size()) >= layout_.num_legs;
+    layout_.jpl = has_wheel ? 4 : 3;
+    layout_.total_active = layout_.num_legs * layout_.jpl;
+
     // ---- 2. 动态查找 joint → actuator 映射 ----
     // MuJoCo 3.x: actuator_trntype (nu x 1) 一维 int*, actuator_trnid (nu x 2) 一维 int*
     // mjTRN_JOINT=0 表示 target 是 joint, 此时 trnid[a*2] 就是 joint id
@@ -390,6 +398,27 @@ void MujocoSim::ScanModelLayout() {
     bindActuator(layout_.hip);
     bindActuator(layout_.knee);
     bindActuator(layout_.foot);
+
+    // ---- 2.5 按关节逐个绑定 torque sensor ----
+    // jointactuatorfrc 的 sensor_objtype/objid 指向 **joint** (不是 actuator),
+    // 因此按 jnt_id 精确匹配，得到每关节独立的 sensordata 偏移。
+    // 这样不再依赖 "每腿 3 个 / 每腿 4 个" 的顺序假设。
+    auto bindTauSensor = [&](std::vector<JointEntry>& group) {
+        for (auto& e : group) {
+            e.tau_sensor_adr = -1;
+            for (int i = 0; i < model_->nsensor; i++) {
+                if (model_->sensor_type[i] != mjSENS_JOINTACTFRC) continue;
+                if (model_->sensor_objtype[i] != mjOBJ_JOINT) continue;
+                if (model_->sensor_objid[i] != e.jnt_id) continue;
+                e.tau_sensor_adr = model_->sensor_adr[i];
+                break;
+            }
+        }
+    };
+    bindTauSensor(layout_.abad);
+    bindTauSensor(layout_.hip);
+    bindTauSensor(layout_.knee);
+    bindTauSensor(layout_.foot);
 
     // ---- 3. 动态查找所有连续 jointactuatorfrc sensor 的合并范围 ----
     // XGB 写法: 12 个独立的 <jointactuatorfrc name=... joint=... />，每个 dim=1, adr 连续
@@ -411,13 +440,27 @@ void MujocoSim::ScanModelLayout() {
         }
     }
 
+    // ---- 4. 按名字解析 IMU / base 传感器偏移 ----
+    // 不同模型关节数不同 → 传感器区整体平移, 绝不能沿用固定偏移.
+    auto sensorAdr = [&](const char* name) -> int {
+        int id = mj_name2id(model_, mjOBJ_SENSOR, name);
+        return (id >= 0) ? model_->sensor_adr[id] : -1;
+    };
+    layout_.sensor_quat_adr     = sensorAdr("imu_quat");
+    layout_.sensor_gyro_adr     = sensorAdr("imu_gyro");
+    layout_.sensor_acc_adr      = sensorAdr("imu_acc");
+    layout_.sensor_framepos_adr = sensorAdr("frame_pos");
+    layout_.sensor_framevel_adr = sensorAdr("frame_vel");
+
     // 诊断输出
     std::cout << "[ScanModelLayout] 关节扫描结果:" << std::endl;
     auto dump = [&](const char* label, const std::vector<JointEntry>& v) {
         std::cout << "  " << label << " (" << v.size() << "):";
         for (auto& e : v) std::cout << " " << e.name
                                     << "(qpos=" << e.qpos_adr
-                                    << ",qvel=" << e.qvel_adr << ")";
+                                    << ",qvel=" << e.qvel_adr
+                                    << ",tau=" << e.tau_sensor_adr
+                                    << ",act=" << e.actuator_id << ")";
         std::cout << std::endl;
     };
     dump("ABAD", layout_.abad);
@@ -426,6 +469,14 @@ void MujocoSim::ScanModelLayout() {
     dump("FOOT", layout_.foot);
     std::cout << "  tau_sensor: adr=" << layout_.tau_sensor_adr
               << " dim=" << layout_.tau_sensor_dim << std::endl;
+    std::cout << "  layout: num_legs=" << layout_.num_legs
+              << " jpl=" << layout_.jpl
+              << " total_active=" << layout_.total_active << std::endl;
+    std::cout << "  sensors: quat=" << layout_.sensor_quat_adr
+              << " gyro=" << layout_.sensor_gyro_adr
+              << " acc=" << layout_.sensor_acc_adr
+              << " framepos=" << layout_.sensor_framepos_adr
+              << " framevel=" << layout_.sensor_framevel_adr << std::endl;
 }
 
 void MujocoSim::Run() {
@@ -894,56 +945,56 @@ void MujocoSim::CarlaSdkBridgeThreadFunc() {
 void MujocoSim::WriteSharedState() {
     std::lock_guard<std::mutex> lock(state_mutex_);
 
-    // ---- 主动关节 (ABAD/HIP/KNEE) 位置/速度/扭矩 ----
-    // 关键: q_joint 必须按 LEG-MAJOR 顺序: [leg0_abd, leg0_hip, leg0_knee, leg1_abd, ...]
-    // 因为 BuildRobotState 用 q_joint[leg*3+role] 组装 protobuf,
-    // ApplyControl 的 diag_fp 日志也用 leg*3+role.
-    // mc_ctrl policy 训练时输入就是这个 leg-major 顺序的 qpos/qvel/tau.
+    // ---- 主动关节 (ABAD/HIP/KNEE + 可选 FOOT/轮) 位置/速度/扭矩 ----
+    // q_joint 必须按 LEG-MAJOR 顺序: [leg0_abd, leg0_hip, leg0_knee, (leg0_foot), leg1_abd, ...]
+    // stride = layout_.jpl (XGB=3, XGW=4)。BuildRobotState 与 policy 都依赖这个顺序。
+    // torque 用每个关节自己扫描到的 sensor 偏移, 不再用 "base + out" 的连续假设.
     {
         int out = 0;
-        const int num_legs = static_cast<int>(std::min({
-            layout_.abad.size(), layout_.hip.size(), layout_.knee.size()}));
+        const int num_legs = layout_.num_legs;
+        const int jpl = layout_.jpl;
+        const int n_sd = model_->nsensordata;
 
         for (int leg = 0; leg < num_legs && out < static_cast<int>(shared_state_.q_joint.size()); leg++) {
-            // 三个 role 依次: abad (out), hip (out+1), knee (out+2)
-            const JointEntry* e_arr[3] = {
-                leg < static_cast<int>(layout_.abad.size()) ? &layout_.abad[leg] : nullptr,
-                leg < static_cast<int>(layout_.hip.size())  ? &layout_.hip[leg]  : nullptr,
-                leg < static_cast<int>(layout_.knee.size()) ? &layout_.knee[leg] : nullptr,
+            const std::vector<JointEntry>* groups[4] = {
+                &layout_.abad, &layout_.hip, &layout_.knee, &layout_.foot
             };
+            for (int r = 0; r < jpl && out < static_cast<int>(shared_state_.q_joint.size()); r++) {
+                const std::vector<JointEntry>& g = *groups[r];
+                if (leg >= static_cast<int>(g.size())) { out++; continue; }
+                const JointEntry& e = g[leg];
 
-            for (int r = 0; r < 3 && out < static_cast<int>(shared_state_.q_joint.size()); r++) {
-                const JointEntry* e = e_arr[r];
-                if (!e) { out++; continue; }
+                shared_state_.q_joint[out]  = static_cast<float>(data_->qpos[e.qpos_adr]);
+                shared_state_.qd_joint[out] = static_cast<float>(data_->qvel[e.qvel_adr]);
 
-                // qpos / qvel (直接读原始值, 不滤波 — 原因见旧代码注释)
-                shared_state_.q_joint[out]  = static_cast<float>(data_->qpos[e->qpos_adr]);
-                shared_state_.qd_joint[out] = static_cast<float>(data_->qvel[e->qvel_adr]);
-
-                // tau: sensordata[tau_sensor_adr + out]  — leg-major 顺序同样适用
-                if (layout_.tau_sensor_adr >= 0
-                    && out < layout_.tau_sensor_dim) {
-                    shared_state_.tau_joint[out] = static_cast<float>(
-                        data_->sensordata[layout_.tau_sensor_adr + out]);
-                } else {
-                    shared_state_.tau_joint[out] = 0.0f;
-                }
+                // tau: 优先用该关节自己的 sensor 偏移; 退回连续区间
+                int tadr = (e.tau_sensor_adr >= 0) ? e.tau_sensor_adr
+                          : ((layout_.tau_sensor_adr >= 0) ? layout_.tau_sensor_adr + out : -1);
+                shared_state_.tau_joint[out] =
+                    (tadr >= 0 && tadr < n_sd)
+                        ? static_cast<float>(data_->sensordata[tadr]) : 0.0f;
 
                 out++;
             }
         }
     }
 
-    // Base position: sensordata[46:48] (frame_pos, adr=46)
-    shared_state_.base_position[0] = static_cast<float>(data_->sensordata[46]);
-    shared_state_.base_position[1] = static_cast<float>(data_->sensordata[47]);
-    shared_state_.base_position[2] = static_cast<float>(data_->sensordata[48]);
+    // 传感器读取: 一律用 ScanModelLayout 解析出的偏移 (模型间关节数不同会整体平移)
+    auto readSensor = [&](int adr, int i) -> float {
+        int a = adr + i;
+        return (adr >= 0 && a < model_->nsensordata)
+                    ? static_cast<float>(data_->sensordata[a]) : 0.0f;
+    };
 
-    // Base quaternion: sensordata[36:39] (imu_quat, adr=36, w,x,y,z)
-    shared_state_.base_quat[0] = static_cast<float>(data_->sensordata[36]);
-    shared_state_.base_quat[1] = static_cast<float>(data_->sensordata[37]);
-    shared_state_.base_quat[2] = static_cast<float>(data_->sensordata[38]);
-    shared_state_.base_quat[3] = static_cast<float>(data_->sensordata[39]);
+    // Base position: frame_pos sensor
+    for (int i = 0; i < 3; i++) {
+        shared_state_.base_position[i] = readSensor(layout_.sensor_framepos_adr, i);
+    }
+
+    // Base quaternion: imu_quat sensor (w,x,y,z)
+    for (int i = 0; i < 4; i++) {
+        shared_state_.base_quat[i] = readSensor(layout_.sensor_quat_adr, i);
+    }
 
     // IMU gyro: 匹配 UE SendStateToMcCtrl() — 从 cvel 读取世界系角速度, R^T 变换到体坐标系.
     // 不使用 sensordata gyro sensor (可能有 bias), 与 UE 完全一致.
@@ -959,15 +1010,15 @@ void MujocoSim::WriteSharedState() {
         shared_state_.imu_gyro[2] = static_cast<float>(R[2]*wx + R[5]*wy + R[8]*wz);
     }
 
-    // IMU acc: sensordata[43:45] (imu_acc, adr=43)
-    shared_state_.imu_acc[0] = static_cast<float>(data_->sensordata[43]);
-    shared_state_.imu_acc[1] = static_cast<float>(data_->sensordata[44]);
-    shared_state_.imu_acc[2] = static_cast<float>(data_->sensordata[45]);
+    // IMU acc: imu_acc sensor
+    for (int i = 0; i < 3; i++) {
+        shared_state_.imu_acc[i] = readSensor(layout_.sensor_acc_adr, i);
+    }
 
-    // Base linear velocity: sensordata[49:51] (frame_vel, adr=49)
-    shared_state_.base_linvel[0] = static_cast<float>(data_->sensordata[49]);
-    shared_state_.base_linvel[1] = static_cast<float>(data_->sensordata[50]);
-    shared_state_.base_linvel[2] = static_cast<float>(data_->sensordata[51]);
+    // Base linear velocity: frame_vel sensor
+    for (int i = 0; i < 3; i++) {
+        shared_state_.base_linvel[i] = readSensor(layout_.sensor_framevel_adr, i);
+    }
 
     // ---- 原始 MuJoCo 数据 (UDP 9999 渲染同步) ----
     // Copy ALL qpos/qvel/tau — sized to actual model (XGW nq=23, XGB nq=19, etc.)
@@ -977,14 +1028,18 @@ void MujocoSim::WriteSharedState() {
     for (int i = 0; i < model_->nv; i++) {
         shared_state_.raw_qvel[i] = data_->qvel[i];
     }
-    // tau: sensordata offset for joint actuator force sensor
-    // sensordata offset is model-dependent; jointactuatorfrc starts after other sensors.
-    // For now assume offset 24 (consistent with XGB/XGW), read model_->nu values.
+    // raw_tau 按 actuator 索引存放: 用每个关节自己的 torque sensor 偏移
     {
-        const int tau_offset = 24;
-        for (int i = 0; i < model_->nu; i++) {
-            int idx = tau_offset + i;
-            shared_state_.raw_tau[i] = (idx < model_->nsensordata) ? data_->sensordata[idx] : 0.0;
+        std::fill(shared_state_.raw_tau.begin(), shared_state_.raw_tau.end(), 0.0);
+        const std::vector<JointEntry>* groups[4] = {
+            &layout_.abad, &layout_.hip, &layout_.knee, &layout_.foot
+        };
+        for (auto* g : groups) {
+            for (const auto& e : *g) {
+                if (e.actuator_id < 0 || e.actuator_id >= model_->nu) continue;
+                if (e.tau_sensor_adr < 0 || e.tau_sensor_adr >= model_->nsensordata) continue;
+                shared_state_.raw_tau[e.actuator_id] = data_->sensordata[e.tau_sensor_adr];
+            }
         }
     }
 
@@ -1010,12 +1065,13 @@ void MujocoSim::ApplyControl() {
 
     const auto& cmd = latest_cmd_;
 
-    // 检查 PD 是否激活 (任一 kp 非零即为激活)
+    // 检查 PD 是否激活 (任一 kp 非零即为激活; 含轮)
     bool pd_active = false;
     for (int leg = 0; leg < 4; leg++) {
         if (cmd.kp_abad_size() > leg && cmd.kp_abad(leg) != 0.0) { pd_active = true; break; }
         if (cmd.kp_hip_size() > leg && cmd.kp_hip(leg) != 0.0) { pd_active = true; break; }
         if (cmd.kp_knee_size() > leg && cmd.kp_knee(leg) != 0.0) { pd_active = true; break; }
+        if (cmd.kp_foot_size() > leg && cmd.kp_foot(leg) != 0.0) { pd_active = true; break; }
     }
 
     if (!pd_active) {
@@ -1093,6 +1149,15 @@ void MujocoSim::ApplyControl() {
                 [&](int i) -> double { return cmd.kp_knee_size()     > i ? cmd.kp_knee(i)     : 0; },
                 [&](int i) -> double { return cmd.kd_knee_size()     > i ? cmd.kd_knee(i)     : 0; },
                 [&](int i) -> double { return cmd.tau_knee_ff_size() > i ? cmd.tau_knee_ff(i)  : 0; });
+        }
+        // FOOT / 轮 (jointType=3) — 仅当模型有轮关节时执行
+        if (leg < static_cast<int>(layout_.foot.size())) {
+            applyJointPD(layout_.foot[leg], leg,
+                [&](int i) -> double { return cmd.q_des_foot_size()  > i ? cmd.q_des_foot(i)  : 0; },
+                [&](int i) -> double { return cmd.qd_des_foot_size() > i ? cmd.qd_des_foot(i) : 0; },
+                [&](int i) -> double { return cmd.kp_foot_size()     > i ? cmd.kp_foot(i)     : 0; },
+                [&](int i) -> double { return cmd.kd_foot_size()     > i ? cmd.kd_foot(i)     : 0; },
+                [&](int i) -> double { return cmd.tau_foot_ff_size() > i ? cmd.tau_foot_ff(i)  : 0; });
         }
     }
 
@@ -1224,34 +1289,34 @@ robot_sdk::pb::RobotState MujocoSim::BuildRobotState() {
     // 注意: 调用者必须已持有 state_mutex_
     robot_sdk::pb::RobotState state;
 
-    // 关节状态: 从 shared_state_ 读取
-    for (int leg = 0; leg < 4; leg++) {
-        state.add_q_abad(shared_state_.q_joint[leg * 3 + 0]);
-        state.add_q_hip(shared_state_.q_joint[leg * 3 + 1]);
-        state.add_q_knee(shared_state_.q_joint[leg * 3 + 2]);
-        state.add_q_foot(0.0f);
+    // 关节状态: 从 shared_state_ 读取 (stride = layout_.jpl, XGB=3, XGW=4)
+    const int jpl = layout_.jpl;
+    const bool has_wheel = (jpl >= 4);
+    for (int leg = 0; leg < layout_.num_legs; leg++) {
+        const int base = leg * jpl;
+        state.add_q_abad(shared_state_.q_joint[base + 0]);
+        state.add_q_hip(shared_state_.q_joint[base + 1]);
+        state.add_q_knee(shared_state_.q_joint[base + 2]);
+        state.add_q_foot(has_wheel ? shared_state_.q_joint[base + 3] : 0.0f);
 
-        state.add_qd_abad(shared_state_.qd_joint[leg * 3 + 0]);
-        state.add_qd_hip(shared_state_.qd_joint[leg * 3 + 1]);
-        state.add_qd_knee(shared_state_.qd_joint[leg * 3 + 2]);
-        state.add_qd_foot(0.0f);
+        state.add_qd_abad(shared_state_.qd_joint[base + 0]);
+        state.add_qd_hip(shared_state_.qd_joint[base + 1]);
+        state.add_qd_knee(shared_state_.qd_joint[base + 2]);
+        state.add_qd_foot(has_wheel ? shared_state_.qd_joint[base + 3] : 0.0f);
     }
 
     // 关节力矩
-    for (int leg = 0; leg < 4; leg++) {
-        state.add_tau_abad_fb(shared_state_.tau_joint[leg * 3 + 0]);
-        state.add_tau_hip_fb(shared_state_.tau_joint[leg * 3 + 1]);
-        state.add_tau_knee_fb(shared_state_.tau_joint[leg * 3 + 2]);
+    for (int leg = 0; leg < layout_.num_legs; leg++) {
+        const int base = leg * jpl;
+        state.add_tau_abad_fb(shared_state_.tau_joint[base + 0]);
+        state.add_tau_hip_fb(shared_state_.tau_joint[base + 1]);
+        state.add_tau_knee_fb(shared_state_.tau_joint[base + 2]);
+        state.add_tau_foot_fb(has_wheel ? shared_state_.tau_joint[base + 3] : 0.0f);
     }
 
     // Base position
     for (int i = 0; i < 3; i++) {
         state.add_position(shared_state_.base_position[i]);
-    }
-
-    // tau_foot_fb (填0, xgb 无足端力矩传感器)
-    for (int i = 0; i < 4; i++) {
-        state.add_tau_foot_fb(0.0f);
     }
 
     // 四元数 (w,x,y,z)

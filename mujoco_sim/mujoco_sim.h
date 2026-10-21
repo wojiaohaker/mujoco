@@ -143,7 +143,8 @@ struct JointEntry {
     int jnt_id;          // model 里的 joint 索引
     int qpos_adr;        // model->jnt_qposadr[jnt_id] → data_->qpos[qpos_adr]
     int qvel_adr;        // model->jnt_dofadr[jnt_id] → data_->qvel[qvel_adr]
-    int actuator_id = -1; // 控制这个 joint 的 actuator 索引 (通过 actuator_trnid 动态查找)
+    int actuator_id = -1;    // 控制这个 joint 的 actuator 索引 (通过 actuator_trnid 动态查找)
+    int tau_sensor_adr = -1; // 该关节的 jointactuatorfrc sensor 偏移 (按 joint 匹配, 不依赖顺序)
 };
 
 /**
@@ -155,9 +156,20 @@ struct ModelLayout {
     std::vector<JointEntry> knee;     // 4 个膝关节
     std::vector<JointEntry> foot;     // 4 个轮子关节 (如果有)
 
-    int total_active = 0;             // abad + hip + knee 的总数（= 12，对四足固定）
+    int num_legs = 4;                 // 腿数 (取 abad/hip/knee 的最小值)
+    int jpl = 3;                      // 每腿关节数: XGB=3, XGW=4 (含轮)
+    int total_active = 0;             // num_legs * jpl (XGB=12, XGW=16)
     int tau_sensor_adr = -1;          // jointactuatorfrc sensor 的 sensordata 起始偏移 (动态查找)
     int tau_sensor_dim = 0;           // jointactuatorfrc sensor 的维度
+
+    // IMU / base 传感器偏移 —— 按 sensor 名字解析。
+    // 不同模型的关节数不同, 传感器区会整体平移 (XGB→XGW 后移 12),
+    // 硬编码会导致把力矩值当成四元数/加速度读出来。
+    int sensor_quat_adr = -1;         // imu_quat (framequat, dim=4)
+    int sensor_gyro_adr = -1;         // imu_gyro (gyro, dim=3)
+    int sensor_acc_adr = -1;          // imu_acc (accelerometer, dim=3)
+    int sensor_framepos_adr = -1;     // frame_pos (framepos, dim=3)
+    int sensor_framevel_adr = -1;     // frame_vel (framelinvel, dim=3)
 };
 
 // ==================== 仿真器 ====================
