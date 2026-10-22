@@ -1150,14 +1150,26 @@ void MujocoSim::ApplyControl() {
                 [&](int i) -> double { return cmd.kd_knee_size()     > i ? cmd.kd_knee(i)     : 0; },
                 [&](int i) -> double { return cmd.tau_knee_ff_size() > i ? cmd.tau_knee_ff(i)  : 0; });
         }
-        // FOOT / 轮 (jointType=3) — 仅当模型有轮关节时执行
+        // FOOT / 轮 (jointType=3) — 仅当模型有轮关节时执行。
+        // 轮子是速度控制语义: ctrl = kp*(q_des-q) + kd*(qd_des-qd) + tau_ff。
+        // 与腿的位置控制不同: kd 作用于速度误差而非 -kd*qd（位置阻尼会把高速
+        // 轮子的驱动削到稳态 qd = qd_des/(90*kd) ≈ 目标 1/9，2026-10-22 离线
+        // 闭环证实该公式导致步态兜圈/塌陷，速度伺服正常轮滑 vx≈vcmd）。
+        // kp 语义由 mc_ctrl 的 regime 决定: walk kp=0 纯速度伺服; hold kp=20
+        // 位置锁定项主导。
         if (leg < static_cast<int>(layout_.foot.size())) {
-            applyJointPD(layout_.foot[leg], leg,
-                [&](int i) -> double { return cmd.q_des_foot_size()  > i ? cmd.q_des_foot(i)  : 0; },
-                [&](int i) -> double { return cmd.qd_des_foot_size() > i ? cmd.qd_des_foot(i) : 0; },
-                [&](int i) -> double { return cmd.kp_foot_size()     > i ? cmd.kp_foot(i)     : 0; },
-                [&](int i) -> double { return cmd.kd_foot_size()     > i ? cmd.kd_foot(i)     : 0; },
-                [&](int i) -> double { return cmd.tau_foot_ff_size() > i ? cmd.tau_foot_ff(i)  : 0; });
+            const JointEntry& we = layout_.foot[leg];
+            double q  = data_->qpos[we.qpos_adr];
+            double qd = data_->qvel[we.qvel_adr];
+            double q_des  = cmd.q_des_foot_size()  > leg ? cmd.q_des_foot(leg)  : 0;
+            double qd_des = cmd.qd_des_foot_size() > leg ? cmd.qd_des_foot(leg) : 0;
+            double kp     = cmd.kp_foot_size()     > leg ? cmd.kp_foot(leg)     : 0;
+            double kd     = cmd.kd_foot_size()     > leg ? cmd.kd_foot(leg)     : 0;
+            double tau_ff = cmd.tau_foot_ff_size() > leg ? cmd.tau_foot_ff(leg) : 0;
+            if (we.actuator_id >= 0 && we.actuator_id < model_->nu) {
+                data_->ctrl[we.actuator_id] =
+                    kp * (q_des - q) + kd * (qd_des - qd) + tau_ff;
+            }
         }
     }
 
@@ -1222,17 +1234,35 @@ void MujocoSim::ApplyControl() {
             fprintf(diag_fp, "%.6f %.6f %.6f %.6f %.6f ",
                     q, qdes, qv, ctrl, gcomp);
         }
+        // FR FOOT (wheel) joint — 有轮子时打印
+        if (!layout_.foot.empty()) {
+            const JointEntry* e = &layout_.foot[0];
+            double q = e ? data_->qpos[e->qpos_adr] : 0;
+            double qv = e ? data_->qvel[e->qvel_adr] : 0;
+            double ctrl = (e && e->actuator_id >= 0 && e->actuator_id < model_->nu)
+                        ? data_->ctrl[e->actuator_id] : 0;
+            double gcomp = e ? data_->qfrc_bias[e->qvel_adr] : 0;
+            double qdes = cmd.q_des_foot_size() > 0 ? cmd.q_des_foot(0) : 0;
+            double qdes_v = cmd.qd_des_foot_size() > 0 ? cmd.qd_des_foot(0) : 0;
+            fprintf(diag_fp, "%.6f %.6f %.6f %.6f %.6f ",
+                    q, qdes, qv, ctrl, gcomp);
+        } else {
+            fprintf(diag_fp, "%.6f %.6f %.6f %.6f %.6f ", 0.0, 0.0, 0.0, 0.0, 0.0);
+        }
         // gains and tau_ff for leg 0
-        fprintf(diag_fp, "%.2f %.2f %.2f %.2f %.2f %.2f %.4f %.4f %.4f ",
+        fprintf(diag_fp, "%.2f %.2f %.2f %.2f %.2f %.2f %.2f %.2f %.2f %.4f %.4f %.4f ",
                 cmd.kp_abad_size() > 0 ? cmd.kp_abad(0) : 0.0,
                 cmd.kp_hip_size() > 0 ? cmd.kp_hip(0) : 0.0,
                 cmd.kp_knee_size() > 0 ? cmd.kp_knee(0) : 0.0,
+                cmd.kp_foot_size() > 0 ? cmd.kp_foot(0) : 0.0,
                 cmd.kd_abad_size() > 0 ? cmd.kd_abad(0) : 0.0,
                 cmd.kd_hip_size() > 0 ? cmd.kd_hip(0) : 0.0,
                 cmd.kd_knee_size() > 0 ? cmd.kd_knee(0) : 0.0,
+                cmd.kd_foot_size() > 0 ? cmd.kd_foot(0) : 0.0,
+                cmd.qd_des_foot_size() > 0 ? cmd.qd_des_foot(0) : 0.0,
                 cmd.tau_abad_ff_size() > 0 ? cmd.tau_abad_ff(0) : 0.0,
                 cmd.tau_hip_ff_size() > 0 ? cmd.tau_hip_ff(0) : 0.0,
-                0.0);
+                cmd.tau_foot_ff_size() > 0 ? cmd.tau_foot_ff(0) : 0.0);
         // v_world (before conversion)
         fprintf(diag_fp, "%.6f %.6f %.6f ",
                 shared_state_.base_linvel[0], shared_state_.base_linvel[1], shared_state_.base_linvel[2]);
